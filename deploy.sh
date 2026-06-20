@@ -832,6 +832,7 @@ _run_teardown() {
   # Discovery-managed RGs (mrg-dscmp-*, mrg-dwsp-*) while we wait, because
   # they're what usually hold up the parent RG delete.
   local deadline=$(( $(date +%s) + 30 * 60 ))
+  local sal_deadlock_warned=0
   while :; do
     if ! az group show -n "$RG" -o none 2>/dev/null; then
       log "Teardown done: $RG is gone."
@@ -860,6 +861,30 @@ _run_teardown() {
       -o tsv 2>/dev/null || true)
     if [[ -z "$mrgs" ]]; then
       log "  ... still deleting $RG (${left}m left); managed RGs: all gone"
+
+      # If MRGs are gone but the parent RG still has resources, check if
+      # we're stuck in the known SAL deadlock (orphan legionservicelink
+      # SAL on agentSubnet blocks both subnet delete AND VNet delete AND
+      # the RG-level cascade). When detected, surface the diagnosis once
+      # and exit early — there's nothing more the script can do; user
+      # must change PREFIX or file an MS support ticket.
+      local remaining_resources sal_count
+      remaining_resources=$(az resource list -g "$RG" --query "length(@)" -o tsv 2>/dev/null || echo 0)
+      sal_count=$(az rest --method get \
+        --url "https://management.azure.com/subscriptions/${sub}/resourceGroups/${RG}/providers/Microsoft.Network/virtualNetworks/vnet-${PREFIX}/subnets/agentSubnet/serviceAssociationLinks?api-version=2024-05-01" \
+        --query "length(value)" -o tsv 2>/dev/null || echo 0)
+      if (( remaining_resources > 0 && sal_count > 0 && sal_deadlock_warned == 0 )); then
+        log ""
+        log "STUCK: parent RG has $remaining_resources resource(s) and agentSubnet has $sal_count orphan SAL(s)."
+        log "       The 'legionservicelink' SAL on agentSubnet blocks subnet, VNet, AND RG delete."
+        log "       Only path forward:"
+        log "         1. Change PREFIX and redeploy into a fresh RG/VNet, OR"
+        log "         2. File a Microsoft support ticket to manually remove the SAL."
+        log "       The current RG will stay in 'Deleting' state indefinitely (no cost) until"
+        log "       Azure GCs it (weeks-months) or support clears the SAL."
+        log "       Exiting wait loop. Use './deploy.sh status' (with new PREFIX) to verify."
+        return 2
+      fi
     else
       log "  ... still deleting $RG (${left}m left); managed RGs still present:"
       local mrg mrg_state mrg_count
