@@ -55,7 +55,11 @@
 #                                            #   ./deploy.sh 4 11111111-2222-3333-...   # specific object id
 #   ./deploy.sh all                          # prereqs + 1 + 2 + 3 + 4
 #   ./deploy.sh outputs                      # list deployed resources
-#   ./deploy.sh teardown                     # delete the resource group
+#   ./deploy.sh teardown                     # full RG delete in dependency order:
+#                                            # workspace -> nodepools -> supercomputer -> RG.
+#                                            # Waits for the RG to fully vanish (TEARDOWN_WAIT=0
+#                                            # to skip the wait). VNet drop also disposes of any
+#                                            # locked `legionservicelink` SAL on agentSubnet.
 #
 # Configure RG/location via env vars:
 #   RG=rg-discovery-yw-uno LOCATION=swedencentral ./deploy.sh 1
@@ -742,6 +746,81 @@ _run_pause() {
 }
 run_pause() { time_step "Pause" _run_pause; }
 
+# Full teardown. RG delete alone often gets blocked on Discovery resources
+# that need explicit child-first deletion in the right order:
+#   nodepools  ->  supercomputer  ->  workspace  ->  RG
+# If the workspace + its capability host are gone before we drop the RG,
+# the orphan `legionservicelink` SAL on agentSubnet also disappears with
+# the VNet (VNet delete bypasses SAL allowDelete:false).
+#
+# Env:
+#   TEARDOWN_WAIT=1 (default)  - wait for RG to fully disappear before returning
+#   TEARDOWN_WAIT=0            - kick off async and return immediately
+_run_teardown() {
+  local sc_name="sc-${PREFIX}" ws_name="ws-${PREFIX}"
+  local sub; sub="$(az account show --query id -o tsv)"
+
+  if ! az group show -n "$RG" -o none 2>/dev/null; then
+    log "RG $RG already gone, nothing to do."
+    return 0
+  fi
+
+  log "Teardown $RG: deleting Discovery children in dependency order first."
+
+  # 1. Workspace (must die before SC so SAL is freed before VNet drop).
+  local ws_state
+  ws_state=$(az rest --method get \
+    --url "https://management.azure.com/subscriptions/${sub}/resourceGroups/${RG}/providers/Microsoft.Discovery/workspaces/${ws_name}?api-version=2026-06-01" \
+    --query properties.provisioningState -o tsv 2>/dev/null || true)
+  if [[ -n "$ws_state" ]]; then
+    log "  - deleting workspace $ws_name (current state: $ws_state)..."
+    az resource delete -g "$RG" --resource-type Microsoft.Discovery/workspaces \
+      --name "$ws_name" 2>&1 | tail -3 || true
+  fi
+
+  # 2. Node pools (must die before SC).
+  local np_id
+  for np_id in $(az resource list -g "$RG" \
+      --resource-type Microsoft.Discovery/supercomputers/nodePools \
+      --query "[].id" -o tsv 2>/dev/null); do
+    log "  - deleting nodePool ${np_id##*/} ..."
+    az resource delete --ids "$np_id" 2>&1 | tail -3 || true
+  done
+
+  # 3. Supercomputer.
+  if az resource show -g "$RG" --resource-type Microsoft.Discovery/supercomputers --name "$sc_name" -o none 2>/dev/null; then
+    log "  - deleting supercomputer $sc_name ..."
+    az resource delete -g "$RG" --resource-type Microsoft.Discovery/supercomputers --name "$sc_name" 2>&1 | tail -3 || true
+  fi
+
+  # 4. Final RG delete (catches anything left + any orphan SAL via cascading VNet drop).
+  log "  - deleting resource group $RG ..."
+  az group delete --name "$RG" --yes --no-wait
+
+  if [[ "${TEARDOWN_WAIT:-1}" != "1" ]]; then
+    log "Teardown initiated (TEARDOWN_WAIT=0; not waiting). Check with: az group show -n $RG"
+    return 0
+  fi
+
+  # 5. Wait until the RG is fully gone.
+  local deadline=$(( $(date +%s) + 30 * 60 ))
+  while :; do
+    if ! az group show -n "$RG" -o none 2>/dev/null; then
+      log "Teardown done: $RG is gone."
+      return 0
+    fi
+    local now=$(date +%s)
+    if (( now > deadline )); then
+      log "WARN: $RG still present after 30 min. Re-run: ./deploy.sh teardown"
+      return 1
+    fi
+    local left=$(( (deadline - now) / 60 ))
+    log "  ... still deleting $RG (${left}m left)"
+    sleep 60
+  done
+}
+run_teardown() { time_step "Teardown" _run_teardown; }
+
 # Stage 3 cleanup. After a failed Stage 3 the workspace + its managed RG
 # (mrg-dwsp-ws-<prefix>-*) often linger, AND the Foundry Capability Host
 # leaves a stale Service Association Link on agentSubnet
@@ -1013,7 +1092,7 @@ case "$cmd" in
   4|foundry-role)              stage_4 "${2:-}" ;;
   all)                         run_prereqs; stage_1; stage_2; stage_3; stage_4 ;;
   outputs)                     az resource list --resource-group "$RG" -o table ;;
-  teardown)                    az group delete --name "$RG" --yes --no-wait ;;
+  teardown)                    run_teardown ;;
   *)
     sed -n '2,15p' "$0"
     exit 1
