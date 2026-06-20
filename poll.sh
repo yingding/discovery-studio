@@ -94,37 +94,53 @@ managed_status_line() {
         {n++; counts[$1]++}
         END {
           if (n==0) {print "0"; exit}
-          # split states into in-progress (non-terminal) and terminal buckets
-          # so the "what is still open" count leads the breakdown
-          order_inprogress = "Running Accepted Creating Updating Deleting Migrating"
-          order_terminal   = "Failed Canceled Succeeded"
-          parts = ""
-          # in-progress first
-          split(order_inprogress, ip, " ")
+
+          # Aggregate buckets. Easy-to-scan numbers come first.
+          inp_states = "Running Accepted Creating Updating Deleting Migrating"
+          fail_states = "Failed Canceled"
+
+          inp_total = 0; inp_detail = ""
+          split(inp_states, ip, " ")
           for (i=1; i<=length(ip); i++) {
             s = ip[i]
-            if (counts[s]) { parts = parts (parts ? ", " : "") counts[s] " " s; delete counts[s] }
-          }
-          # then terminal states (Failed/Canceled before Succeeded)
-          split(order_terminal, tm, " ")
-          for (i=1; i<=length(tm); i++) {
-            s = tm[i]
-            if (counts[s]) { parts = parts (parts ? ", " : "") counts[s] " " s; delete counts[s] }
-          }
-          # any leftover unknown states (filter empty entries that BSD awk may
-          # have implicitly created from earlier `if (counts[s])` reads)
-          for (s in counts) {
-            if (counts[s] != "" && counts[s] > 0) {
-              parts = parts (parts ? ", " : "") counts[s] " " s
+            if (counts[s]+0 > 0) {
+              inp_total += counts[s]
+              inp_detail = inp_detail (inp_detail ? ", " : "") counts[s] " " s
+              delete counts[s]
             }
           }
 
-          # always show the breakdown; add a ✓ marker when nothing is in progress
-          if (parts ~ /^[0-9]+ Succeeded$/) {
-            print n " ✓ (" parts ")"
-          } else {
-            print n " (" parts ")"
+          fail_total = 0; fail_detail = ""
+          split(fail_states, fl, " ")
+          for (i=1; i<=length(fl); i++) {
+            s = fl[i]
+            if (counts[s]+0 > 0) {
+              fail_total += counts[s]
+              fail_detail = fail_detail (fail_detail ? ", " : "") counts[s] " " s
+              delete counts[s]
+            }
           }
+
+          succ = counts["Succeeded"]+0
+          delete counts["Succeeded"]
+
+          # any leftover unknown states
+          other_total = 0; other_detail = ""
+          for (s in counts) {
+            if (counts[s] != "" && counts[s]+0 > 0) {
+              other_total += counts[s]
+              other_detail = other_detail (other_detail ? ", " : "") counts[s] " " s
+            }
+          }
+
+          # Compose: lead with whats still open (in-progress + failed), then succeeded
+          out = n " total"
+          if (inp_total > 0)  out = out " | " inp_total " in-progress (" inp_detail ")"
+          if (fail_total > 0) out = out " | " fail_total " failed (" fail_detail ")"
+          if (other_total > 0) out = out " | " other_total " other (" other_detail ")"
+          out = out " | " succ " succeeded"
+          if (inp_total == 0 && fail_total == 0 && other_total == 0) out = out " ✓"
+          print out
         }')"
     out="${out} | ${mrg}=${summary}"
   done
