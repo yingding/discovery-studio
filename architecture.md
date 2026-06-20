@@ -23,7 +23,8 @@ flowchart LR
     P[prereqs<br/>RG + RPs] --> S1
     S1[01-network.bicep<br/>VNet + 6 subnets] --> S2
     S2[02-supercomputer.bicep<br/>UAMI + Storage + RBAC<br/>+ Supercomputer + NodePool] --> S3
-    S3[03-workspace.bicep<br/>Workspace + ChatModel<br/>+ Project + Container]
+    S3[03-workspace.bicep<br/>Workspace + ChatModel<br/>+ Project + Container] --> S4
+    S4[Stage 4 - role grant<br/>'Foundry User' on workspace managed RG]
 ```
 
 Stages 2 and 3 reuse resources from earlier stages via `existing` references (look up by name).
@@ -132,6 +133,9 @@ Other SKU examples: `Standard_D4s_v6` (CPU-only), `Standard_NC24ads_A100_v4` (A1
 
 ## What is *not* in this template (handle once, out of band)
 
+> For the exhaustive list of every Azure resource that ends up in your subscription after `./deploy.sh all` — including the ones the Discovery RP auto-creates (`act…` storage, `mobr-*` brokers, `mrg-dscmp-*` and `MC_mrg-dscmp-*` sibling RGs, EventGrid system topics) — see [resources-deployed.md](resources-deployed.md).
+
 - ~~The custom **Discovery NSP Perimeter Joiner** role + assignment~~ — **now handled by `./deploy.sh prereqs`** via the `ensure_nsp_joiner_role` function (subscription-scoped, idempotent). Reference: [Microsoft Discovery NSP docs](https://learn.microsoft.com/en-gb/azure/microsoft-discovery/how-to-configure-network-security?tabs=azure-cli#assign-the-nsp-perimeter-joiner-role).
 - Persona role assignments (Platform Admin etc.) — assign via `./deploy.sh roles` or the [official PowerShell script](https://learn.microsoft.com/en-gb/azure/microsoft-discovery/how-to-assign-persona-roles).
+- `Foundry User` on the workspace's managed RG — assign via `./deploy.sh 4` (post-Stage-3); required to open the workspace in Discovery Studio.
 - Resource provider registration — handled by `./deploy.sh prereqs`.

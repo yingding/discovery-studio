@@ -65,9 +65,10 @@ Why the NSP Joiner role? The GA API `Microsoft.Discovery/*@2026-06-01` auto-crea
 | Command | Stage | Wall-clock | Resources |
 |---|---|---|---|
 | `./deploy.sh 1` (or `network`) | 1 | ~1 min | VNet + 6 subnets |
-| `./deploy.sh 2` (or `supercomputer` / `sc`) | 2 | ~20–35 min (SC ~8–15 min, np1 ~10–25 min) | UAMI · Storage · RBAC · Supercomputer · Node Pool |
+| `./deploy.sh 2` (or `supercomputer` / `sc`) | 2 | ~10–20 min (SC ~8–15 min, np1 ~2–5 min once VMSS create is allowed) | UAMI · Storage · RBAC · Supercomputer · Node Pool |
 | `./deploy.sh 3` (or `workspace` / `ws`) | 3 | ~15–30 min | Workspace · Chat Model · Project · Discovery Storage Container |
-| `./deploy.sh all` | prereqs + 1 + 2 + 3 | ~40–70 min | Everything |
+| `./deploy.sh 4` (or `foundry-role`) | 4 (post-deploy) | ~10 s | Assigns `Foundry User` to the signed-in az user (or `./deploy.sh 4 <upn-or-objectid>`) on the workspace's managed RG so Discovery Studio can open the workspace. Idempotent. |
+| `./deploy.sh all` | prereqs + 1 + 2 + 3 + 4 | ~40–70 min | Everything end-to-end |
 | `./deploy.sh build` | none (local) | ~10 s | Local `az bicep build` of all 3 templates |
 
 Every stage prints `START` / `END` / elapsed-minute banners around the `az deployment group create` call.
@@ -145,7 +146,7 @@ Excludes: egress, support plans, chat-model token consumption, AKS-internal traf
 
 After Stage 3 finishes, sign in to <https://studio.discovery.microsoft.com/>, select your workspace (`ws-<PREFIX>`), create a project investigation, and start a chat.
 
-You may also need to assign yourself the **Foundry User** role on the workspace's managed RG once it appears — `./deploy.sh roles` notes this.
+If the workspace doesn't open, run **Stage 4** (`./deploy.sh 4`) to assign the `Foundry User` role to the signed-in az user on the workspace's managed RG. Pass a UPN or object id to assign to someone else: `./deploy.sh 4 alice@example.com`.
 
 ## Troubleshooting
 
@@ -158,4 +159,4 @@ You may also need to assign yourself the **Foundry User** role on the workspace'
 | Poller stuck on `Unknown` | List query transient empty | Re-run; the script tolerates 5 consecutive Unknowns then exits rc=2 |
 | `./deploy.sh prereqs` fails on role create | Not Owner/UAA on the subscription | Ask a subscription owner to run `./deploy.sh nsp-role` once |
 
-For deeper architectural context (resource graph, network model, RBAC mapping), read [architecture.md](architecture.md). For a complete RBAC role-by-role reference (who, where, why), read [roleconcept.md](roleconcept.md).
+For deeper architectural context (resource graph, network model, RBAC mapping), read [architecture.md](architecture.md). For a complete RBAC role-by-role reference (who, where, why), read [roleconcept.md](roleconcept.md). For the full inventory of every resource that ends up in your subscription — yours plus the auto-created ones — read [resources-deployed.md](resources-deployed.md).

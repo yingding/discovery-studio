@@ -73,7 +73,7 @@ Optional but recommended. Assigned by `./deploy.sh roles [user-upn-or-objectid]`
 
 | Role | Type | Why it's needed |
 |---|---|---|
-| **Foundry User** | Built-in | After Stage 3 completes, Discovery creates a managed RG for the workspace (Azure AI Foundry resources). To open the workspace in Discovery Studio and use the chat model, assign yourself **Foundry User** on that managed RG. Not done by this repo's scripts. |
+| **Foundry User** | Built-in | After Stage 3 completes, Discovery creates a managed RG for the workspace (Azure AI Foundry resources). To open the workspace in Discovery Studio and use the chat model, assign yourself **Foundry User** on that managed RG. **Automated by `./deploy.sh 4`** (defaults to the signed-in az user; pass a UPN/object id to target someone else). |
 
 To find the managed RG after Stage 3:
 
@@ -118,17 +118,18 @@ sequenceDiagram
 | `AuthorizationFailed` writing to storage from a pod | Storage Blob Data Contributor (on UAMI) | Re-run `./deploy.sh 2` (Bicep recreates the assignment) |
 | `unauthorized: authentication required` pulling image | AcrPull (on UAMI) | Re-run `./deploy.sh 2` |
 | Cannot create / list Discovery resources in Azure portal | Microsoft Discovery Platform Administrator on RG | `./deploy.sh roles` |
-| Can see workspace but no chat / project access in Discovery Studio | Foundry User on workspace's managed RG | Assign manually in portal (see above) |
+| Can see workspace but no chat / project access in Discovery Studio | Foundry User on workspace's managed RG | `./deploy.sh 4` (or assign manually in portal) |
 
 ## What this repo does *not* do
 
 - **Custom kubelet ACR auth** — uses the default AcrPull on the same UAMI.
 - **Network Security Perimeter scope changes** — only joins your sub to the NSP Discovery creates; doesn't add other resources.
 - **Conditional Access / Entra App role consent** — assumed already in place for the tenant.
-- **Foundry User on the workspace managed RG** — manual one-time step after Stage 3.
+- **Foundry User on the workspace managed RG** — automated by `./deploy.sh 4` (one-shot post-Stage-3 helper); also assignable manually in portal.
 
 ## References
 
+- [Resources deployed (full inventory)](resources-deployed.md)
 - [Quickstart helper-script reference](quickstart.md)
 - [Architecture and resource graph](architecture.md)
 - [`deploy.sh`](deploy.sh) — `ensure_nsp_joiner_role`, `run_roles`, and the Bicep role assignments
