@@ -20,6 +20,7 @@ STAGE="${STAGE:-2}"
 INTERVAL="${INTERVAL:-60}"
 SC_NAME="sc-${PREFIX}"
 NP_NAME="np1"
+WS_NAME="ws-${PREFIX}"
 
 SUB="$(az account show --query id -o tsv)"
 
@@ -69,22 +70,52 @@ while :; do
   fi
   dep_state="${dep_state:-Unknown}"
 
-  # Supercomputer state
-  sc_state="$(az resource show -g "$RG" \
-    --resource-type Microsoft.Discovery/supercomputers \
-    --name "$SC_NAME" \
-    --query properties.provisioningState -o tsv 2>/dev/null || echo Missing)"
+  # Per-stage resource snapshot
+  resources=""
+  case "$STAGE" in
+    2)
+      sc_state="$(az resource show -g "$RG" \
+        --resource-type Microsoft.Discovery/supercomputers \
+        --name "$SC_NAME" \
+        --query properties.provisioningState -o tsv 2>/dev/null || echo Missing)"
+      np_state="$(az resource show \
+        --ids "/subscriptions/${SUB}/resourceGroups/${RG}/providers/Microsoft.Discovery/supercomputers/${SC_NAME}/nodePools/${NP_NAME}" \
+        --query properties.provisioningState -o tsv 2>/dev/null || echo Missing)"
+      resources=" | sc=$(state_color "$sc_state") | np1=$(state_color "$np_state")"
+      ;;
+    3)
+      ws_state="$(az resource show -g "$RG" \
+        --resource-type Microsoft.Discovery/workspaces \
+        --name "$WS_NAME" \
+        --query properties.provisioningState -o tsv 2>/dev/null || echo Missing)"
+      # Chat model deployment (best-effort; name comes from latest stage3 output if available)
+      cm_state="$(az resource list -g "$RG" \
+        --resource-type Microsoft.Discovery/workspaces/chatModelDeployments \
+        --query "[0].properties.provisioningState" -o tsv 2>/dev/null || echo Missing)"
+      [[ -z "$cm_state" ]] && cm_state=Missing
+      prj_state="$(az resource list -g "$RG" \
+        --resource-type Microsoft.Discovery/workspaces/projects \
+        --query "[0].properties.provisioningState" -o tsv 2>/dev/null || echo Missing)"
+      [[ -z "$prj_state" ]] && prj_state=Missing
+      stc_state="$(az resource list -g "$RG" \
+        --resource-type Microsoft.Discovery/storageContainers \
+        --query "[0].properties.provisioningState" -o tsv 2>/dev/null || echo Missing)"
+      [[ -z "$stc_state" ]] && stc_state=Missing
+      resources=" | ws=$(state_color "$ws_state") | chat=$(state_color "$cm_state") | proj=$(state_color "$prj_state") | stc=$(state_color "$stc_state")"
+      ;;
+    1)
+      vn_state="$(az resource show -g "$RG" \
+        --resource-type Microsoft.Network/virtualNetworks \
+        --name "vnet-${PREFIX}" \
+        --query properties.provisioningState -o tsv 2>/dev/null || echo Missing)"
+      resources=" | vnet=$(state_color "$vn_state")"
+      ;;
+  esac
 
-  # Node pool state (only meaningful in stage 2)
-  np_state="$(az resource show \
-    --ids "/subscriptions/${SUB}/resourceGroups/${RG}/providers/Microsoft.Discovery/supercomputers/${SC_NAME}/nodePools/${NP_NAME}" \
-    --query properties.provisioningState -o tsv 2>/dev/null || echo Missing)"
-
-  printf '[%s | +%3dm] deployment=%-30s %s | sc=%s | np1=%s\n' \
+  printf '[%s | +%3dm] deployment=%-30s %s%s\n' \
     "$now" "$elapsed" "$dep_name" \
     "$(state_color "$dep_state")" \
-    "$(state_color "$sc_state")" \
-    "$(state_color "$np_state")"
+    "$resources"
 
   if is_terminal "$dep_state"; then
     echo
