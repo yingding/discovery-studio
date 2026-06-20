@@ -10,6 +10,16 @@ Three-stage Bicep deployment based on the official [Azure quickstart](https://gi
 
 For deep dives see [architecture.md](architecture.md) (resource graph, RBAC, network model), [roleconcept.md](roleconcept.md) (every RBAC role used and why), and [quickstart.md](quickstart.md) (full helper-script reference).
 
+## Contents
+
+- [Minimal quickstart](#minimal-quickstart)
+- [Prerequisites](#prerequisites)
+- [Helper scripts](#helper-scripts)
+- [Estimated cost (default Sweden Central deployment)](#estimated-cost-default-sweden-central-deployment)
+- [Customising each stage](#customising-each-stage)
+- [Local validation](#local-validation)
+- [Connect](#connect)
+
 ## Minimal quickstart
 
 ```bash

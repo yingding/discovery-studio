@@ -5,6 +5,17 @@ This deployment is split into **3 independent Bicep stages** so you can iterate 
 All resources land in a **single resource group** in **one region** (default `swedencentral`).
 Default naming prefix: `disc-yw` (e.g. `vnet-disc-yw`, `sc-disc-yw`, `ws-disc-yw`).
 
+## Contents
+
+- [Stage layout](#stage-layout)
+- [Full resource graph](#full-resource-graph)
+- [Resource-by-resource breakdown](#resource-by-resource-breakdown)
+  - [Stage 1 — `01-network.bicep`](#stage-1--01-networkbicep)
+  - [Stage 2 — `02-supercomputer.bicep`](#stage-2--02-supercomputerbicep)
+  - [Stage 3 — `03-workspace.bicep`](#stage-3--03-workspacebicep)
+- [Key design points](#key-design-points)
+- [What is *not* in this template (handle once, out of band)](#what-is-not-in-this-template-handle-once-out-of-band)
+
 ## Stage layout
 
 ```mermaid

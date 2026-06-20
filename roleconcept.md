@@ -2,6 +2,19 @@
 
 Every Azure RBAC role assignment this deployment creates, who it's assigned to, where the scope sits, and what would break without it. Use this as the source of truth when reviewing access in a security audit or troubleshooting permission errors.
 
+## Contents
+
+- [Identity inventory](#identity-inventory)
+- [Roles by scope](#roles-by-scope)
+  - [Subscription scope — Discovery first-party SP](#subscription-scope--discovery-first-party-sp)
+  - [Resource-group scope — UAMI `uami-<PREFIX>`](#resource-group-scope--uami-uami-prefix)
+  - [Resource-group scope — your user (Platform Admin persona)](#resource-group-scope--your-user-platform-admin-persona)
+  - [Workspace managed-RG scope — your user (Foundry User)](#workspace-managed-rg-scope--your-user-foundry-user)
+- [Permission flow diagrams](#permission-flow-diagrams)
+- [Common error → role mapping](#common-error--role-mapping)
+- [What this repo does *not* do](#what-this-repo-does-not-do)
+- [References](#references)
+
 ## Identity inventory
 
 Three distinct identities touch this deployment:

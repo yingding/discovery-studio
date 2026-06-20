@@ -2,6 +2,20 @@
 
 End-to-end walkthrough of the helper scripts in this repo: [deploy.sh](deploy.sh), [poll.sh](poll.sh), [cost.sh](cost.sh). Companion to the high-level [README.md](README.md) and the design doc [architecture.md](architecture.md).
 
+## Contents
+
+- [TL;DR](#tldr)
+- [Prerequisites (once per subscription)](#prerequisites-once-per-subscription)
+- [`deploy.sh` subcommand reference](#deploysh-subcommand-reference)
+  - [Setup](#setup)
+  - [Deploy](#deploy)
+  - [Lifecycle](#lifecycle)
+  - [Customisation](#customisation)
+- [`poll.sh` — watch a deployment in real time](#pollsh--watch-a-deployment-in-real-time)
+- [`cost.sh` — live monthly estimate](#costsh--live-monthly-estimate)
+- [Connect](#connect)
+- [Troubleshooting](#troubleshooting)
+
 ## TL;DR
 
 ```bash
