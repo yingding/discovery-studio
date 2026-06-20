@@ -119,9 +119,9 @@ managed_status_line() {
             }
           }
 
-          # collapse to "all Succeeded" when nothing else
+          # always show the breakdown; add a ✓ marker when nothing is in progress
           if (parts ~ /^[0-9]+ Succeeded$/) {
-            print n " ✓ all Succeeded"
+            print n " ✓ (" parts ")"
           } else {
             print n " (" parts ")"
           }
