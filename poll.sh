@@ -290,9 +290,36 @@ while :; do
       echo "Deployment '$dep_name' is in terminal state: $(state_color "$dep_state")"
       if [[ "$dep_state" == "Failed" ]]; then
         echo "Failed operations:"
+        # ARM error messages often have 3 nested layers:
+        #   outer "ARM template deployment 'x' failed with the following errors:\n..."
+        #   middle "Details:\n<actionable message>"
+        #   trailing "Raw:\n{escaped-json-with-same-message-again}"
+        # Dumping the raw JSON buries the one useful sentence under hundreds
+        # of chars. Parse with Python: print resource, type, and ONLY the
+        # most-inner 'Details:' line (or the outer message if no Details).
         az deployment operation group list -g "$RG" --name "$dep_name" \
           --query "[?properties.provisioningState=='Failed'].{resource:properties.targetResource.resourceName, type:properties.targetResource.resourceType, err:properties.statusMessage.error.message}" \
-          -o jsonc
+          -o json 2>/dev/null \
+        | python3 -c '
+import json, re, sys
+try:
+    ops = json.load(sys.stdin)
+except Exception:
+    ops = []
+if not ops:
+    print("  (no failed operations returned)")
+for op in ops:
+    res = op.get("resource") or "<n/a>"
+    typ = op.get("type") or "<n/a>"
+    raw = op.get("err") or ""
+    # Pick the "Details:\n..." block if present, otherwise first line.
+    m = re.search(r"Details:\s*\n(.+?)(?:\n\s*Raw:|\Z)", raw, re.DOTALL)
+    inner = (m.group(1) if m else raw.splitlines()[0] if raw else "").strip()
+    # Collapse runs of whitespace for one-line output.
+    inner = re.sub(r"\s+", " ", inner)[:400]
+    print(f"  - {typ}/{res}")
+    print(f"      \x1b[1;31m{inner}\x1b[0m")
+' || true
       fi
       prev_dep_name="$dep_name"
       prev_dep_state="$dep_state"

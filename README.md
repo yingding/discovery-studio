@@ -37,6 +37,8 @@ Or run all stages in one shot with `./deploy.sh all`.
 
 When idle: `./deploy.sh pause` (drops idle cost to ~$0). Resume with `./deploy.sh 2`.
 
+Quick health check at any time: `./deploy.sh status` (shows what's deployed across all 4 stages + flags any orphan state).
+
 See [quickstart.md](quickstart.md) for the full subcommand reference, customisation knobs, and troubleshooting.
 
 ## Prerequisites
@@ -52,7 +54,7 @@ See [quickstart.md](quickstart.md) for the full subcommand reference, customisat
 
 | Script | Purpose |
 |---|---|
-| [deploy.sh](deploy.sh) | All lifecycle commands: `prereqs`, `1`/`2`/`3`/`4`/`all`, `pause`, `teardown`, `roles`, `outputs`, `build` |
+| [deploy.sh](deploy.sh) | All lifecycle commands: `prereqs`, `1`/`2`/`3`/`4`/`all`, `status`, `pause`, `cleanup-ws`, `teardown`, `roles`, `outputs`, `build` |
 | [poll.sh](poll.sh) | Color-coded real-time watcher for the latest deployment + SC + np1 |
 | [cost.sh](cost.sh) | Live monthly cost estimate from the Azure Retail Prices API |
 

@@ -30,13 +30,15 @@
 #   ./deploy.sh pause                        # delete the supercomputer (and its managed mrg-dscmp-* RG)
 #                                            # to stop the always-on system-pool cost. VNet/UAMI/
 #                                            # storage/RBAC are kept. Resume with `./deploy.sh 2`.
+#   ./deploy.sh status                       # read-only one-screen summary of Stage 1–4 + orphan flags
+#                                            # (no Azure mutations; great for re-orienting on a project).
 #   ./deploy.sh cleanup-ws | cleanup-3       # full Stage 3 cleanup after a failed workspace deploy:
 #                                            # delete the workspace + its managed RG (mrg-dwsp-*),
 #                                            # then force-delete the stale Foundry Service Association
 #                                            # Link ('legionservicelink') that gets left on agentSubnet.
 #                                            # Without this, every retry fails with
 #                                            # "subnet agentSubnet is already in use".
-#                                            # Env: CLEANUP_WAIT_MIN=15 (max minutes to wait for the
+#                                            # Env: CLEANUP_WAIT_MIN=10 (max minutes to wait for the
 #                                            # managed RG to disappear before forcing SAL delete),
 #                                            # CLEANUP_RECREATE_SUBNET=1 (last resort: drop the subnet
 #                                            # and re-run Stage 1 to restore it).
@@ -752,7 +754,7 @@ run_pause() { time_step "Pause" _run_pause; }
 # Steps:
 #   1. Delete the Discovery workspace (cascades to its managed RG).
 #   2. Wait for every mrg-dwsp-ws-<prefix>-* RG to disappear (up to
-#      CLEANUP_WAIT_MIN minutes, default 15).
+#      CLEANUP_WAIT_MIN minutes, default 10).
 #   3. Force-delete the leftover SAL on agentSubnet via REST.
 #   4. As a last resort, delete + Bicep-recreate agentSubnet itself
 #      (only when CLEANUP_RECREATE_SUBNET=1; default 0 since step 3
@@ -762,7 +764,7 @@ run_pause() { time_step "Pause" _run_pause; }
 _run_cleanup_ws() {
   local ws_name="ws-${PREFIX}"
   local sub vnet="vnet-${PREFIX}" subnet="agentSubnet"
-  local wait_min="${CLEANUP_WAIT_MIN:-15}"
+  local wait_min="${CLEANUP_WAIT_MIN:-10}"
   sub="$(az account show --query id -o tsv)"
 
   log "Stage 3 cleanup: workspace=$ws_name, vnet=$vnet, subnet=$subnet"
@@ -807,12 +809,14 @@ _run_cleanup_ws() {
     remaining=$(az group list \
       --query "[?starts_with(name, 'mrg-dwsp-${ws_name}-')].name" -o tsv 2>/dev/null)
     [[ -z "$remaining" ]] && break
-    if (( $(date +%s) > deadline )); then
+    local now_ts=$(date +%s)
+    if (( now_ts > deadline )); then
       log "WARN: managed RG still present after ${wait_min}m: ${remaining//$'\n'/, }"
       log "      proceeding with SAL cleanup anyway — re-run later if SAL delete fails."
       break
     fi
-    log "Waiting for managed RG to disappear: ${remaining//$'\n'/, }"
+    local left_min=$(( (deadline - now_ts) / 60 ))
+    log "Waiting for managed RG (${left_min}m left): ${remaining//$'\n'/, }"
     sleep 30
   done
 
@@ -920,6 +924,79 @@ _stage_4() {
 }
 stage_4() { time_step "Stage 4" _stage_4 "$@"; }
 
+# Quick read-only status across all 4 stages + orphan flags. No mutations.
+# Helps you remember where a project left off after coming back to it cold.
+_run_status() {
+  local sub vnet="vnet-${PREFIX}" subnet="agentSubnet" ws_name="ws-${PREFIX}" sc_name="sc-${PREFIX}"
+  sub="$(az account show --query id -o tsv)"
+  local sub_name; sub_name="$(az account show --query name -o tsv)"
+
+  printf '\n\033[1;36m== Discovery deployment status ==\033[0m\n'
+  printf '  subscription : %s (%s)\n' "$sub_name" "$sub"
+  printf '  resource grp : %s\n' "$RG"
+  printf '  region       : %s\n' "$LOCATION"
+  printf '  prefix       : %s\n' "$PREFIX"
+
+  if ! az group show -n "$RG" -o none 2>/dev/null; then
+    printf '\n  \033[1;33mRG %s does not exist — run: ./deploy.sh prereqs\033[0m\n' "$RG"
+    return 0
+  fi
+
+  # --- Stage 1 ---
+  local vnet_state subnet_count
+  vnet_state="$(az resource show -g "$RG" --resource-type Microsoft.Network/virtualNetworks --name "$vnet" --query properties.provisioningState -o tsv 2>/dev/null || echo Missing)"
+  subnet_count="$(az network vnet subnet list -g "$RG" --vnet-name "$vnet" --query "length(@)" -o tsv 2>/dev/null || echo 0)"
+  printf '\n  \033[1mStage 1 (network)\033[0m   vnet=%s subnets=%s\n' "$vnet_state" "$subnet_count"
+
+  # --- Stage 2 ---
+  local sc_state np_state
+  sc_state="$(az resource show -g "$RG" --resource-type Microsoft.Discovery/supercomputers --name "$sc_name" --query properties.provisioningState -o tsv 2>/dev/null || echo Missing)"
+  np_state="$(az resource show --ids "/subscriptions/${sub}/resourceGroups/${RG}/providers/Microsoft.Discovery/supercomputers/${sc_name}/nodePools/np1" --query properties.provisioningState -o tsv 2>/dev/null || echo Missing)"
+  printf '  \033[1mStage 2 (sc)\033[0m        sc=%s np1=%s\n' "$sc_state" "$np_state"
+
+  # --- Stage 3 ---
+  local ws_state cm_state prj_state stc_state
+  ws_state="$(az rest --method get --url "https://management.azure.com/subscriptions/${sub}/resourceGroups/${RG}/providers/Microsoft.Discovery/workspaces/${ws_name}?api-version=2026-06-01" --query properties.provisioningState -o tsv 2>/dev/null || echo Missing)"
+  cm_state="$(az resource list -g "$RG" --resource-type Microsoft.Discovery/workspaces/chatModelDeployments --query "[0].provisioningState" -o tsv 2>/dev/null)"; [[ -z "$cm_state" ]] && cm_state=Missing
+  prj_state="$(az resource list -g "$RG" --resource-type Microsoft.Discovery/workspaces/projects --query "[0].provisioningState" -o tsv 2>/dev/null)"; [[ -z "$prj_state" ]] && prj_state=Missing
+  stc_state="$(az resource list -g "$RG" --resource-type Microsoft.Discovery/storageContainers --query "[0].provisioningState" -o tsv 2>/dev/null)"; [[ -z "$stc_state" ]] && stc_state=Missing
+  printf '  \033[1mStage 3 (ws)\033[0m        ws=%s chat=%s proj=%s stc=%s\n' "$ws_state" "$cm_state" "$prj_state" "$stc_state"
+
+  # --- Stage 4: signed-in user's Foundry User assignment on the workspace MRG ---
+  if [[ "$ws_state" == "Succeeded" ]]; then
+    local mrg signed_oid has_role
+    mrg="$(az resource show -g "$RG" --resource-type Microsoft.Discovery/workspaces --name "$ws_name" --query properties.managedResourceGroup -o tsv 2>/dev/null || true)"
+    signed_oid="$(az ad signed-in-user show --query id -o tsv 2>/dev/null || true)"
+    if [[ -n "$mrg" && -n "$signed_oid" ]]; then
+      has_role="$(az role assignment list --assignee "$signed_oid" --scope "/subscriptions/${sub}/resourceGroups/${mrg}" --role 'Foundry User' --query "[0].id" -o tsv 2>/dev/null || true)"
+      if [[ -n "$has_role" ]]; then
+        printf '  \033[1mStage 4 (role)\033[0m      Foundry User assigned on %s (signed-in user)\n' "$mrg"
+      else
+        printf '  \033[1mStage 4 (role)\033[0m      \033[1;33mNOT assigned\033[0m on %s — run: ./deploy.sh 4\n' "$mrg"
+      fi
+    fi
+  else
+    printf '  \033[1mStage 4 (role)\033[0m      (skipped — needs ws Succeeded)\n'
+  fi
+
+  # --- Orphan flags ---
+  local orphan_mrgs sals
+  orphan_mrgs="$(az group list --query "[?starts_with(name, 'mrg-dwsp-${ws_name}-')].name" -o tsv 2>/dev/null || true)"
+  sals="$(az rest --method get --url "https://management.azure.com/subscriptions/${sub}/resourceGroups/${RG}/providers/Microsoft.Network/virtualNetworks/${vnet}/subnets/${subnet}/serviceAssociationLinks?api-version=2024-05-01" --query "value[].name" -o tsv 2>/dev/null || true)"
+
+  # An MRG/SAL is only an "orphan" if there's no live workspace owning it.
+  if [[ "$ws_state" != "Succeeded" && "$ws_state" != "Accepted" && "$ws_state" != "Running" && "$ws_state" != "Creating" && "$ws_state" != "Updating" ]]; then
+    if [[ -n "$orphan_mrgs" || -n "$sals" ]]; then
+      printf '\n  \033[1;33mOrphans detected\033[0m (no live workspace):\n'
+      [[ -n "$orphan_mrgs" ]] && printf '    - managed RG : %s\n' "${orphan_mrgs//$'\n'/, }"
+      [[ -n "$sals"        ]] && printf '    - SAL on %s : %s\n' "$subnet" "${sals//$'\n'/, }"
+      printf '    Run: ./deploy.sh cleanup-ws  (or rely on stage_3 preflight)\n'
+    fi
+  fi
+  echo
+}
+run_status() { _run_status; }
+
 cmd="${1:-}"
 case "$cmd" in
   build)                       run_build ;;
@@ -927,6 +1004,7 @@ case "$cmd" in
   roles)                       run_roles "${2:-}" ;;
   nsp-role)                    ensure_nsp_joiner_role ;;
   mcaps-exempt)                ensure_mcaps_exemption ;;
+  status)                      run_status ;;
   pause)                       run_pause ;;
   cleanup-ws|cleanup-3)        run_cleanup_ws ;;
   1|network)                   stage_1 ;;
