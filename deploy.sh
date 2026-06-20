@@ -71,7 +71,27 @@ SUBSCRIPTION="$(az account show --query id -o tsv)"
 
 log() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 
-run_prereqs() {
+# Print a START/END/elapsed banner around a function call.
+# Usage: time_step <label> <function-name> [args...]
+# Prints END on success and on error (since `|| rc=$?` swallows the exit code);
+# not on Ctrl-C / signal kills.
+time_step() {
+  local label="$1"; shift
+  local start_ts start_human end_human elapsed_s elapsed_min rc=0
+  start_ts=$(date +%s)
+  start_human=$(date '+%Y-%m-%d %H:%M:%S %Z')
+  log "${label} START: $start_human"
+
+  "$@" || rc=$?
+
+  end_human=$(date '+%Y-%m-%d %H:%M:%S %Z')
+  elapsed_s=$(( $(date +%s) - start_ts ))
+  elapsed_min=$(awk "BEGIN { printf \"%.1f\", $elapsed_s/60 }")
+  log "${label} END:   $end_human  (elapsed: ${elapsed_min} min / ${elapsed_s}s, rc=$rc)"
+  return $rc
+}
+
+_run_prereqs() {
   log "Subscription : $SUBSCRIPTION"
   log "Resource grp : $RG"
   log "Location     : $LOCATION"
@@ -106,6 +126,8 @@ run_prereqs() {
   ensure_nsp_joiner_role
 }
 
+run_prereqs() { time_step "Prereqs" _run_prereqs; }
+
 run_stage() {
   local num="$1" file="$2"
   shift 2
@@ -120,30 +142,21 @@ run_stage() {
     ${extra_params[@]+"${extra_params[@]}"} \
     -o none
 
-  local start_ts start_human end_human elapsed_s elapsed_min rc=0
-  start_ts=$(date +%s)
-  start_human=$(date '+%Y-%m-%d %H:%M:%S %Z')
   log "Stage $num: deploying $file (this can take 15-30 min for SC/Workspace)..."
-  log "Stage $num START: $start_human"
+  time_step "Stage $num" _stage_deploy "$num" "$file" "${extra_params[@]}"
+}
 
-  # Always print the end summary, even on error / Ctrl-C.
-  _stage_summary() {
-    end_human=$(date '+%Y-%m-%d %H:%M:%S %Z')
-    elapsed_s=$(( $(date +%s) - start_ts ))
-    elapsed_min=$(awk "BEGIN { printf \"%.1f\", $elapsed_s/60 }")
-    log "Stage $num END:   $end_human  (elapsed: ${elapsed_min} min / ${elapsed_s}s, rc=$rc)"
-  }
-  trap _stage_summary RETURN
-
+_stage_deploy() {
+  local num="$1" file="$2"
+  shift 2
+  local extra_params=("$@")
   az deployment group create \
     --resource-group "$RG" \
     --name "stage${num}-$(date +%Y%m%d-%H%M%S)" \
     --template-file "$file" \
     --parameters "${file%.bicep}.parameters.json" \
     --parameters location="$LOCATION" \
-    ${extra_params[@]+"${extra_params[@]}"} || rc=$?
-
-  return $rc
+    ${extra_params[@]+"${extra_params[@]}"}
 }
 
 run_build() {
@@ -222,6 +235,26 @@ ensure_nsp_joiner_role() {
     sleep_after=30
   else
     printf '  Role assignment already exists, skipping.\n'
+  fi
+
+  # 4. Reader at subscription scope — required by the Discovery control plane
+  #    to enumerate resources when associating the NSP in Enforced mode.
+  #    Without this, SC creation fails with:
+  #      "Control Plane service principal does not have Reader permission at
+  #       subscription. Reader role is required for NSP associations in
+  #       Enforced mode."
+  local reader_assigned
+  reader_assigned="$(az role assignment list --assignee "$sp_oid" --role Reader --scope "$sub_scope" --query "[0].id" -o tsv 2>/dev/null || true)"
+  if [[ -z "$reader_assigned" ]]; then
+    printf '  Assigning Reader role to Discovery SP at subscription scope...\n'
+    az role assignment create \
+      --assignee-object-id "$sp_oid" \
+      --assignee-principal-type ServicePrincipal \
+      --role Reader \
+      --scope "$sub_scope" -o none
+    sleep_after=$(( sleep_after > 30 ? sleep_after : 30 ))
+  else
+    printf '  Reader role assignment already exists, skipping.\n'
   fi
 
   if (( sleep_after > 0 )); then

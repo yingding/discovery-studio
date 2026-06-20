@@ -6,9 +6,11 @@
 #   INTERVAL=30 ./poll.sh                  # custom interval (seconds)
 #   RG=rg-foo PREFIX=disc-bar ./poll.sh    # custom RG and prefix
 #   STAGE=3 ./poll.sh                      # poll Stage 3 (workspace) instead
+#   MAX_UNKNOWN=10 ./poll.sh               # tolerate up to N consecutive Unknowns before giving up (default 5)
 #
 # Stops automatically when the deployment reaches a terminal state
-# (Succeeded / Failed / Canceled).
+# (Succeeded / Failed / Canceled) or after MAX_UNKNOWN consecutive
+# unreadable polls.
 
 set -uo pipefail
 
@@ -39,6 +41,9 @@ is_terminal() {
   esac
 }
 
+MAX_UNKNOWN="${MAX_UNKNOWN:-5}"   # consecutive 'Unknown' polls before giving up
+unknown_streak=0
+
 start_ts="$(date +%s)"
 echo "Polling RG=$RG prefix=$PREFIX stage=$STAGE every ${INTERVAL}s (Ctrl-C to stop)"
 echo
@@ -54,6 +59,14 @@ while :; do
       -o tsv 2>/dev/null
   )
   dep_name="${dep_name:-<none>}"
+  dep_state="${dep_state:-}"
+
+  # If the list query came back empty (transient API hiccup), fall back to
+  # a direct `deployment show` on the last-known name so we don't get stuck
+  # on a stale 'Unknown' forever.
+  if [[ -z "$dep_state" && "$dep_name" != "<none>" ]]; then
+    dep_state="$(az deployment group show -g "$RG" -n "$dep_name" --query properties.provisioningState -o tsv 2>/dev/null || true)"
+  fi
   dep_state="${dep_state:-Unknown}"
 
   # Supercomputer state
@@ -84,6 +97,20 @@ while :; do
       exit 1
     fi
     exit 0
+  fi
+
+  # Track consecutive 'Unknown' polls so we don't loop forever when ARM/Graph
+  # can't return a state (e.g. RG just deleted, or transient throttling).
+  if [[ "$dep_state" == "Unknown" ]]; then
+    unknown_streak=$(( unknown_streak + 1 ))
+    if (( unknown_streak >= MAX_UNKNOWN )); then
+      echo
+      echo "Got 'Unknown' deployment state ${unknown_streak} times in a row. Giving up."
+      echo "(Set MAX_UNKNOWN=N to change the threshold; run ./deploy.sh ... to start a new deployment.)"
+      exit 2
+    fi
+  else
+    unknown_streak=0
   fi
 
   sleep "$INTERVAL"
