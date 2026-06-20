@@ -63,11 +63,11 @@ CHAT_MODEL_NAME="${CHAT_MODEL_NAME:-gpt-5-mini}"            # set to "" to skip 
 # the GPU VMSS the Discovery node pool creates.
 MCAPS_EXEMPTION="${MCAPS_EXEMPTION:-0}"
 MCAPS_EXEMPTION_NAME="${MCAPS_EXEMPTION_NAME:-discovery-mcapsgov-${PREFIX}}"
-# Which MCAPSGov assignment to exempt against. The admin-created exemption
-# on this subscription is on "MCAPSGov Deploy and Modify Policies"
-# (assignment name MCAPSGovDeployPolicies). Override if your tenant's admin
-# chose a different one (e.g. MCAPSGovDenyPolicies).
-MCAPS_ASSIGNMENT_NAME="${MCAPS_ASSIGNMENT_NAME:-MCAPSGovDeployPolicies}"
+# Which MCAPSGov assignments to check/exempt. Comma-separated list of
+# assignment names. Defaults cover both the Deploy/Modify initiative and
+# the Deny initiative (the actual RequestDisallowedByPolicy source for
+# GPU VMSS creation).
+MCAPS_ASSIGNMENT_NAMES="${MCAPS_ASSIGNMENT_NAMES:-${MCAPS_ASSIGNMENT_NAME:-MCAPSGovDeployPolicies,MCAPSGovDenyPolicies}}"
 # Exemption category: Waiver (accept risk, no compensating control) or
 # Mitigated (risk addressed elsewhere, e.g. Defender for Cloud + managed
 # Discovery control plane). Mitigated reads better in audits.
@@ -302,23 +302,34 @@ ensure_nsp_joiner_role() {
 #
 # Only runs when MCAPS_EXEMPTION=1 (opt-in). Skip otherwise.
 ensure_mcaps_exemption() {
-  log "Ensuring MCAPSGov policy exemption (${MCAPS_EXEMPTION_CATEGORY}) at subscription scope..."
+  log "Ensuring MCAPSGov policy exemption(s) at subscription scope..."
   local sub_scope="/subscriptions/$SUBSCRIPTION"
 
-  # 1. Discover the target MCAPSGov assignment by name via REST `atScope()`
-  #    (this surfaces MG-inherited assignments). Looks for the assignment
-  #    name in $MCAPS_ASSIGNMENT_NAME (default: MCAPSGovDeployPolicies).
+  # Process each assignment name in MCAPS_ASSIGNMENT_NAMES (comma-separated).
+  local assignment_name
+  IFS=',' read -r -a _names <<< "$MCAPS_ASSIGNMENT_NAMES"
+  for assignment_name in "${_names[@]}"; do
+    assignment_name="$(printf '%s' "$assignment_name" | tr -d '[:space:]')"
+    [[ -z "$assignment_name" ]] && continue
+    _ensure_mcaps_exemption_one "$assignment_name"
+  done
+}
+
+_ensure_mcaps_exemption_one() {
+  local assignment_name="$1"
+  local sub_scope="/subscriptions/$SUBSCRIPTION"
+  log "  -> assignment: $assignment_name"
+
+  # 1. Discover the target MCAPSGov assignment by name via REST `atScope()`.
   local assignment_id
   assignment_id="$(az rest --method get \
     --uri "https://management.azure.com${sub_scope}/providers/Microsoft.Authorization/policyAssignments?api-version=2023-04-01&\$filter=atScope()" \
-    --query "value[?name=='${MCAPS_ASSIGNMENT_NAME}'] | [0].id" -o tsv 2>/dev/null || true)"
+    --query "value[?name=='${assignment_name}'] | [0].id" -o tsv 2>/dev/null || true)"
   if [[ -z "$assignment_id" ]]; then
-    echo "WARN: MCAPSGov assignment '$MCAPS_ASSIGNMENT_NAME' not visible at sub scope." >&2
-    echo "      Skipping. Override with MCAPS_ASSIGNMENT_NAME=<other-name>" >&2
-    echo "      or ask your MG admin to identify the right assignment." >&2
+    echo "     WARN: assignment '$assignment_name' not visible at sub scope; skipping." >&2
     return 0
   fi
-  printf '  MCAPSGov assignment: %s\n' "$assignment_id"
+  printf '     id: %s\n' "$assignment_id"
 
   # 2. Skip if ANY exemption (regardless of name/scope) already targets this
   #    MCAPSGov assignment and is visible at sub scope. Covers both
@@ -326,26 +337,27 @@ ensure_mcaps_exemption() {
   #    Note: the API returns policyAssignmentId all-lowercase, so we match
   #    case-insensitively on the assignment name suffix.
   local needle
-  needle="$(printf '%s' "$MCAPS_ASSIGNMENT_NAME" | tr '[:upper:]' '[:lower:]')"
+  needle="$(printf '%s' "$assignment_name" | tr '[:upper:]' '[:lower:]')"
   local existing
   existing="$(az rest --method get \
     --uri "https://management.azure.com${sub_scope}/providers/Microsoft.Authorization/policyExemptions?api-version=2022-07-01-preview&\$filter=atScope()" \
     --query "value[?ends_with(properties.policyAssignmentId, '/${needle}')].{name:name, category:properties.exemptionCategory, expires:properties.expiresOn, displayName:properties.displayName}" -o jsonc 2>/dev/null || true)"
   if [[ -n "$existing" && "$existing" != "[]" ]]; then
-    printf '  Exemption already exists for this assignment, skipping create:\n'
-    printf '%s\n' "$existing" | sed 's/^/    /'
+    printf '     Exemption already exists, skipping create:\n'
+    printf '%s\n' "$existing" | sed 's/^/       /'
     return 0
   fi
 
-  # 3. Create the exemption at sub scope.
-  printf '  Creating %s exemption %s (expires %s)...\n' "$MCAPS_EXEMPTION_CATEGORY" "$MCAPS_EXEMPTION_NAME" "$MCAPS_EXEMPTION_EXPIRES_ON"
+  # 3. Create the exemption at sub scope (unique name per assignment).
+  local exemption_name="${MCAPS_EXEMPTION_NAME}-${assignment_name}"
+  printf '     Creating %s exemption %s (expires %s)...\n' "$MCAPS_EXEMPTION_CATEGORY" "$exemption_name" "$MCAPS_EXEMPTION_EXPIRES_ON"
   local body
   body=$(cat <<EOF
 {
   "properties": {
     "policyAssignmentId": "${assignment_id}",
     "exemptionCategory": "${MCAPS_EXEMPTION_CATEGORY}",
-    "displayName": "Microsoft Discovery (${PREFIX}) GPU VMSS exemption",
+    "displayName": "Microsoft Discovery (${PREFIX}) GPU VMSS exemption (${assignment_name})",
     "description": "Allow Microsoft.Discovery node pool to create the underlying VMSS for GPU SKUs (e.g. ${NODE_POOL_VM_SIZE}). Risk addressed by Defender for Cloud + the Discovery managed control plane. Created by deploy.sh ensure_mcaps_exemption().",
     "expiresOn": "${MCAPS_EXEMPTION_EXPIRES_ON}"
   }
@@ -353,14 +365,14 @@ ensure_mcaps_exemption() {
 EOF
 )
   if az rest --method put \
-    --uri "https://management.azure.com${sub_scope}/providers/Microsoft.Authorization/policyExemptions/${MCAPS_EXEMPTION_NAME}?api-version=2022-07-01-preview" \
+    --uri "https://management.azure.com${sub_scope}/providers/Microsoft.Authorization/policyExemptions/${exemption_name}?api-version=2022-07-01-preview" \
     --body "$body" -o none 2>/tmp/az-exempt-err; then
-    printf '  Exemption created.\n'
+    printf '     Exemption created.\n'
   else
-    echo "WARN: Failed to create exemption. You likely lack Microsoft.Authorization/policyExemptions/write" >&2
-    echo "      at the assignment scope. Error:" >&2
-    sed 's/^/        /' /tmp/az-exempt-err >&2
-    echo "      For MCAPS subs, request an exemption via the internal Genie/IDWeb process described at https://aka.ms/AzPolicyWiki." >&2
+    echo "     WARN: Failed to create exemption. You likely lack 'Microsoft.Authorization/policyAssignments/exempt/action'" >&2
+    echo "           at the assignment scope. Ask your MG admin to create the exemption." >&2
+    echo "           Error:" >&2
+    sed 's/^/             /' /tmp/az-exempt-err >&2
   fi
   rm -f /tmp/az-exempt-err
 }
