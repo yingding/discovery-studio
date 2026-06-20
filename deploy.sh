@@ -30,6 +30,16 @@
 #   ./deploy.sh pause                        # delete the supercomputer (and its managed mrg-dscmp-* RG)
 #                                            # to stop the always-on system-pool cost. VNet/UAMI/
 #                                            # storage/RBAC are kept. Resume with `./deploy.sh 2`.
+#   ./deploy.sh cleanup-ws | cleanup-3       # full Stage 3 cleanup after a failed workspace deploy:
+#                                            # delete the workspace + its managed RG (mrg-dwsp-*),
+#                                            # then force-delete the stale Foundry Service Association
+#                                            # Link ('legionservicelink') that gets left on agentSubnet.
+#                                            # Without this, every retry fails with
+#                                            # "subnet agentSubnet is already in use".
+#                                            # Env: CLEANUP_WAIT_MIN=15 (max minutes to wait for the
+#                                            # managed RG to disappear before forcing SAL delete),
+#                                            # CLEANUP_RECREATE_SUBNET=1 (last resort: drop the subnet
+#                                            # and re-run Stage 1 to restore it).
 #   ./deploy.sh 1 | network                  # Stage 1: VNet + subnets
 #   ./deploy.sh 2 | supercomputer            # Stage 2: UAMI + Storage + RBAC + SC + NodePool
 #   ./deploy.sh 3 | workspace                # Stage 3: Workspace + ChatModel + Project + Container
@@ -660,6 +670,107 @@ _run_pause() {
 }
 run_pause() { time_step "Pause" _run_pause; }
 
+# Stage 3 cleanup. After a failed Stage 3 the workspace + its managed RG
+# (mrg-dwsp-ws-<prefix>-*) often linger, AND the Foundry Capability Host
+# leaves a stale Service Association Link on agentSubnet
+# (`legionservicelink`, linkedResourceType Microsoft.App/environments).
+# Until that SAL is removed, every retry fails with:
+#   "The subnet 'agentSubnet' is already in use. The subnet must not
+#    already be in use by any other environment or Azure service."
+# This subcommand does the full sweep so a retry is one command away.
+#
+# Steps:
+#   1. Delete the Discovery workspace (cascades to its managed RG).
+#   2. Wait for every mrg-dwsp-ws-<prefix>-* RG to disappear (up to
+#      CLEANUP_WAIT_MIN minutes, default 15).
+#   3. Force-delete the leftover SAL on agentSubnet via REST.
+#   4. As a last resort, delete + Bicep-recreate agentSubnet itself
+#      (only when CLEANUP_RECREATE_SUBNET=1; default 0 since step 3
+#      almost always frees it).
+#
+# Idempotent — safe to run multiple times. Re-run Stage 3 after this.
+_run_cleanup_ws() {
+  local ws_name="ws-${PREFIX}"
+  local sub vnet="vnet-${PREFIX}" subnet="agentSubnet"
+  local wait_min="${CLEANUP_WAIT_MIN:-15}"
+  sub="$(az account show --query id -o tsv)"
+
+  log "Stage 3 cleanup: workspace=$ws_name, vnet=$vnet, subnet=$subnet"
+
+  # --- 1. Delete the workspace (if any state present) ---
+  if az resource show -g "$RG" --resource-type Microsoft.Discovery/workspaces \
+        --name "$ws_name" --query name -o tsv >/dev/null 2>&1; then
+    log "Deleting workspace $ws_name (cascades to mrg-dwsp-*; this can take 5-15 min)..."
+    az resource delete -g "$RG" --resource-type Microsoft.Discovery/workspaces \
+      --name "$ws_name" 2>&1 | tail -5 || true
+  else
+    log "Workspace $ws_name not present, skipping delete."
+  fi
+
+  # --- 2. Wait for every Foundry managed RG (mrg-dwsp-ws-<prefix>-*) to vanish ---
+  local deadline=$(( $(date +%s) + wait_min * 60 ))
+  local remaining
+  while :; do
+    remaining=$(az group list \
+      --query "[?starts_with(name, 'mrg-dwsp-${ws_name}-')].name" -o tsv 2>/dev/null)
+    [[ -z "$remaining" ]] && break
+    if (( $(date +%s) > deadline )); then
+      log "WARN: managed RG still present after ${wait_min}m: ${remaining//$'\n'/, }"
+      log "      proceeding with SAL cleanup anyway — re-run later if SAL delete fails."
+      break
+    fi
+    log "Waiting for managed RG to disappear: ${remaining//$'\n'/, }"
+    sleep 30
+  done
+
+  # --- 3. Force-delete stale Service Association Links on agentSubnet ---
+  local sals
+  sals=$(az rest --method get \
+    --url "https://management.azure.com/subscriptions/${sub}/resourceGroups/${RG}/providers/Microsoft.Network/virtualNetworks/${vnet}/subnets/${subnet}/serviceAssociationLinks?api-version=2024-05-01" \
+    --query "value[].name" -o tsv 2>/dev/null || true)
+  if [[ -z "$sals" ]]; then
+    log "No service association links on ${subnet}. Clean."
+  else
+    local sal
+    for sal in $sals; do
+      log "Force-deleting SAL ${subnet}/${sal} ..."
+      if az rest --method delete \
+          --url "https://management.azure.com/subscriptions/${sub}/resourceGroups/${RG}/providers/Microsoft.Network/virtualNetworks/${vnet}/subnets/${subnet}/serviceAssociationLinks/${sal}?api-version=2024-05-01&force=true" \
+          -o none 2>/tmp/az-sal-err; then
+        log "  ${sal} deleted."
+      else
+        log "  ${sal} delete FAILED: $(tr -d '\n' </tmp/az-sal-err | head -c 240)"
+        log "  Re-run after the managed RG is fully gone, OR set CLEANUP_RECREATE_SUBNET=1 to drop & restage subnet."
+      fi
+      rm -f /tmp/az-sal-err
+    done
+  fi
+
+  # --- 4. Optional nuclear option: delete + recreate agentSubnet ---
+  if [[ "${CLEANUP_RECREATE_SUBNET:-0}" == "1" ]]; then
+    log "CLEANUP_RECREATE_SUBNET=1: deleting subnet ${subnet} and re-running Stage 1."
+    az network vnet subnet delete -g "$RG" --vnet-name "$vnet" -n "$subnet" || true
+    stage_1
+  fi
+
+  # --- Final verification ---
+  log "Verifying ${subnet} is free..."
+  local left_sals
+  left_sals=$(az rest --method get \
+    --url "https://management.azure.com/subscriptions/${sub}/resourceGroups/${RG}/providers/Microsoft.Network/virtualNetworks/${vnet}/subnets/${subnet}/serviceAssociationLinks?api-version=2024-05-01" \
+    --query "value[].name" -o tsv 2>/dev/null || true)
+  if [[ -z "$left_sals" ]]; then
+    log "OK — ${subnet} has no SALs. Re-run Stage 3 with: ./deploy.sh 3"
+  else
+    log "WARN — SAL(s) still present: ${left_sals//$'\n'/, }"
+    log "      Wait a few minutes for the managed RG delete to finish, then re-run: ./deploy.sh cleanup-ws"
+    log "      Or set CLEANUP_RECREATE_SUBNET=1 ./deploy.sh cleanup-ws to drop & recreate the subnet."
+    exit 1
+  fi
+}
+run_cleanup_ws() { time_step "Cleanup-ws" _run_cleanup_ws; }
+
+
 # Stage 4: post-deployment role grant. The Discovery workspace creates a
 # Foundry-managed RG (typically `mrg-<workspaceName>-<region>-<random>`)
 # that hosts the Azure AI Foundry account + project. Discovery Studio
@@ -724,6 +835,7 @@ case "$cmd" in
   nsp-role)                    ensure_nsp_joiner_role ;;
   mcaps-exempt)                ensure_mcaps_exemption ;;
   pause)                       run_pause ;;
+  cleanup-ws|cleanup-3)        run_cleanup_ws ;;
   1|network)                   stage_1 ;;
   2|supercomputer|sc)          stage_2 ;;
   3|workspace|ws)              stage_3 ;;
