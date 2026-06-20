@@ -77,50 +77,92 @@ discovery_status_lines() {
   '
 }
 
-# Print a summary of each Discovery-managed sibling RG: `<rg-prefix>: N (counts)`.
-# Discovers them via `properties.managedResourceGroup` on Discovery parents in $RG.
-# Format per MRG:
-#   <mrg> | resources=N total | <inprog>+<failed>+<succ counts> | deploys=M total | <similar>
-# When everything in a bucket is Succeeded, collapses to `N succeeded ✓`.
-managed_status_line() {
-  local mrgs mrg out=""
+# Print a multi-line tree summary of each Discovery-managed sibling RG
+# (mrg-dscmp-* / mrg-dwsp-*). Discovers them via
+# `properties.managedResourceGroup` on Discovery parents in $RG.
+#
+# Output format (when there are MRGs):
+#   └─ managed
+#      ├─ mrg-<name>
+#      │  ├─ resources=N succeeded ✓              # compact when all green
+#      │  └─ nested-deploys=M total              # tree when mixed
+#      │     ├─ X in-progress (X Running)
+#      │     └─ Y succeeded
+#      └─ mrg-<other> ...
+#
+# Prints nothing when no MRGs exist (e.g. Stage 1).
+# `nested-deploys` = ARM Microsoft.Resources/deployments nested inside the MRG.
+managed_status_block() {
+  local mrgs parent_name parent_type mrg
+  local -a all_mrgs=()
   mrgs="$(az resource list -g "$RG" \
     --query "[?type=='Microsoft.Discovery/supercomputers' || type=='Microsoft.Discovery/workspaces'].name" \
     -o tsv 2>/dev/null)"
   for parent_name in $mrgs; do
-    local parent_type
     parent_type="$(az resource list -g "$RG" --name "$parent_name" --query "[0].type" -o tsv 2>/dev/null)"
     mrg="$(az resource show -g "$RG" --resource-type "$parent_type" --name "$parent_name" \
       --query properties.managedResourceGroup -o tsv 2>/dev/null || true)"
-    [[ -z "$mrg" ]] && continue
-
-    local resource_summary deploy_summary
-    resource_summary="$(az resource list -g "$mrg" --query '[].provisioningState' -o tsv 2>/dev/null \
-      | _bucket_summary)"
-    deploy_summary="$(az deployment group list -g "$mrg" --query '[].properties.provisioningState' -o tsv 2>/dev/null \
-      | _bucket_summary)"
-
-    out="${out} | ${mrg} resources=${resource_summary} | deploys=${deploy_summary}"
+    [[ -n "$mrg" ]] && all_mrgs+=("$mrg")
   done
-  printf '%s' "$out"
+
+  (( ${#all_mrgs[@]} == 0 )) && return 0
+
+  printf '└─ managed\n'
+  local mrg_idx mrg_last_idx=$(( ${#all_mrgs[@]} - 1 ))
+  local mrg_branch mrg_indent
+  for mrg_idx in "${!all_mrgs[@]}"; do
+    mrg="${all_mrgs[$mrg_idx]}"
+    if (( mrg_idx == mrg_last_idx )); then
+      mrg_branch='└─'; mrg_indent='   '
+    else
+      mrg_branch='├─'; mrg_indent='│  '
+    fi
+    printf '   %s %s\n' "$mrg_branch" "$mrg"
+    _render_bucket "resources" "   ${mrg_indent}├─" "   ${mrg_indent}│  " \
+      "$(az resource list -g "$mrg" --query '[].provisioningState' -o tsv 2>/dev/null)"
+    _render_bucket "nested-deploys" "   ${mrg_indent}└─" "   ${mrg_indent}   " \
+      "$(az deployment group list -g "$mrg" --query '[].properties.provisioningState' -o tsv 2>/dev/null)"
+  done
 }
 
-# Helper used by managed_status_line: read provisioning-state values on stdin
-# (one per line) and emit a bucketed summary.
-#   "<N> total | <inprog> in-progress (<details>) | <failed> failed (<details>) | <succ> succeeded [✓]"
-# When all are Succeeded, collapses to "<N> succeeded ✓".
-_bucket_summary() {
-  awk 'BEGIN{n=0}
-    {n++; counts[$1]++}
+# Return 0 if at least one Discovery-managed RG exists for this PREFIX. Used
+# by the main loop to decide which tree branch char to use on discovery items.
+has_managed_rgs() {
+  local mrgs parent_name parent_type mrg
+  mrgs="$(az resource list -g "$RG" \
+    --query "[?type=='Microsoft.Discovery/supercomputers' || type=='Microsoft.Discovery/workspaces'].name" \
+    -o tsv 2>/dev/null)"
+  for parent_name in $mrgs; do
+    parent_type="$(az resource list -g "$RG" --name "$parent_name" --query "[0].type" -o tsv 2>/dev/null)"
+    mrg="$(az resource show -g "$RG" --resource-type "$parent_type" --name "$parent_name" \
+      --query properties.managedResourceGroup -o tsv 2>/dev/null || true)"
+    [[ -n "$mrg" ]] && return 0
+  done
+  return 1
+}
+
+# Render one bucket (resources or nested-deploys) into the tree.
+#   $1 = label ("resources" or "nested-deploys")
+#   $2 = branch prefix (e.g. "   │  ├─" or "   │  └─")
+#   $3 = continuation indent for breakdown lines (e.g. "   │  │  ")
+#   $4 = newline-separated provisioning-state values
+# Compact when all Succeeded: `<prefix> <label>=N succeeded ✓`.
+# Otherwise tree: header + one child line per non-empty bucket
+# (in-progress / failed / other / succeeded), so X + Y + Z visibly sums to N.
+_render_bucket() {
+  local label="$1" prefix="$2" indent="$3" states="$4"
+  printf '%s' "$states" | awk -v label="$label" -v prefix="$prefix" -v indent="$indent" '
+    BEGIN{n=0}
+    NF>0 {n++; counts[$1]++}
     END {
-      if (n==0) {print "0"; exit}
-      inp_states = "Running Accepted Creating Updating Deleting Migrating"
+      if (n==0) { printf "%s %s=0\n", prefix, label; exit }
+      inp_states  = "Running Accepted Creating Updating Deleting Migrating"
       fail_states = "Failed Canceled"
 
-      inp_total = 0; inp_detail = ""
+      inp_total=0; inp_detail=""
       split(inp_states, ip, " ")
       for (i=1; i<=length(ip); i++) {
-        s = ip[i]
+        s=ip[i]
         if (counts[s]+0 > 0) {
           inp_total += counts[s]
           inp_detail = inp_detail (inp_detail ? ", " : "") counts[s] " " s
@@ -128,10 +170,10 @@ _bucket_summary() {
         }
       }
 
-      fail_total = 0; fail_detail = ""
+      fail_total=0; fail_detail=""
       split(fail_states, fl, " ")
       for (i=1; i<=length(fl); i++) {
-        s = fl[i]
+        s=fl[i]
         if (counts[s]+0 > 0) {
           fail_total += counts[s]
           fail_detail = fail_detail (fail_detail ? ", " : "") counts[s] " " s
@@ -142,7 +184,7 @@ _bucket_summary() {
       succ = counts["Succeeded"]+0
       delete counts["Succeeded"]
 
-      other_total = 0; other_detail = ""
+      other_total=0; other_detail=""
       for (s in counts) {
         if (counts[s] != "" && counts[s]+0 > 0) {
           other_total += counts[s]
@@ -150,18 +192,40 @@ _bucket_summary() {
         }
       }
 
-      # Collapse to compact form when only Succeeded entries
+      # Compact: all Succeeded -> single line
       if (inp_total == 0 && fail_total == 0 && other_total == 0) {
-        print n " succeeded ✓"
+        printf "%s %s=%d succeeded ✓\n", prefix, label, n
       } else {
-        out = n " total"
-        if (inp_total > 0)   out = out " | " inp_total " in-progress (" inp_detail ")"
-        if (fail_total > 0)  out = out " | " fail_total " failed (" fail_detail ")"
-        if (other_total > 0) out = out " | " other_total " other (" other_detail ")"
-        out = out " | " succ " succeeded"
-        print out
+        printf "%s %s=%d total\n", prefix, label, n
+        parts = 0
+        if (inp_total > 0)   parts++
+        if (fail_total > 0)  parts++
+        if (other_total > 0) parts++
+        if (succ > 0)        parts++
+        seen = 0
+        if (inp_total > 0) {
+          seen++
+          br = (seen == parts) ? "└─" : "├─"
+          printf "%s%s %d in-progress (%s)\n", indent, br, inp_total, inp_detail
+        }
+        if (fail_total > 0) {
+          seen++
+          br = (seen == parts) ? "└─" : "├─"
+          printf "%s%s %d failed (%s)\n", indent, br, fail_total, fail_detail
+        }
+        if (other_total > 0) {
+          seen++
+          br = (seen == parts) ? "└─" : "├─"
+          printf "%s%s %d other (%s)\n", indent, br, other_total, other_detail
+        }
+        if (succ > 0) {
+          seen++
+          br = (seen == parts) ? "└─" : "├─"
+          printf "%s%s %d succeeded\n", indent, br, succ
+        }
       }
-    }'
+    }
+  '
 }
 
 MAX_UNKNOWN="${MAX_UNKNOWN:-5}"   # consecutive 'Unknown' polls before giving up
@@ -239,31 +303,51 @@ while :; do
       ;;
   esac
 
-  printf '[%s | +%3dm] deployment=%-30s %s%s\n' \
+  # Mark stale historical deployments so the user doesn't mistake an old
+  # 'Failed' record for the current state. Compact marker — appended right
+  # after the state, doesn't shift downstream columns much.
+  stale_marker=""
+  if is_terminal "$dep_state" && [[ -n "$dep_ts" ]]; then
+    dep_age_min_hdr=$(python3 -c "
+import datetime
+try:
+    ts = datetime.datetime.fromisoformat('$dep_ts'.replace('Z', '+00:00').split('+')[0] + '+00:00')
+    print(int((datetime.datetime.now(datetime.timezone.utc) - ts).total_seconds() / 60))
+except Exception:
+    print(0)
+" 2>/dev/null || echo 0)
+    if (( dep_age_min_hdr >= STALE_MIN )); then
+      stale_marker=" \033[2m(history, ${dep_age_min_hdr}m old)\033[0m"
+    fi
+  fi
+
+  printf '[%s | +%3dm] deployment=%-30s %s%b%s\n' \
     "$now" "$elapsed" "$dep_name" \
     "$(state_color "$dep_state")" \
+    "$stale_marker" \
     "$resources"
 
   # Lines 2..N-1: dynamic verbose list of every Microsoft.Discovery/* resource.
   # One resource per line for readability. Tree chars indicate hierarchy.
-  # Line N: managed RG summary.
+  # Final block: managed RG summary (tree form, see managed_status_block).
   if [[ "$STAGE" != "1" ]]; then
-    # Collect discovery items + managed line first so we know last-line markers.
+    # Collect discovery items + check for managed RGs so we know last-line markers.
     disc_items=()
     while IFS=$'\t' read -r label state; do
       [[ -n "$label" ]] && disc_items+=("$label=$(state_color "$state")")
     done < <(discovery_status_lines)
-    mrg_line="$(managed_status_line)"
+    mrg_present=0
+    has_managed_rgs && mrg_present=1
 
     if (( ${#disc_items[@]} > 0 )); then
       printf '├─ discovery\n'
       last_idx=$((${#disc_items[@]} - 1))
       for i in "${!disc_items[@]}"; do
-        if [[ -n "$mrg_line" ]]; then
-          # managed line follows -> all discovery items use ├ (non-last branch)
+        if (( mrg_present == 1 )); then
+          # managed block follows -> all discovery items use ├ (non-last branch)
           printf '│  ├─ %s\n' "${disc_items[$i]}"
         else
-          # no managed line -> last discovery item uses └
+          # no managed block -> last discovery item uses └
           if (( i == last_idx )); then
             printf '│  └─ %s\n' "${disc_items[$i]}"
           else
@@ -273,8 +357,8 @@ while :; do
       done
     fi
 
-    if [[ -n "$mrg_line" ]]; then
-      printf '└─ managed%s\n' "$mrg_line"
+    if (( mrg_present == 1 )); then
+      managed_status_block
     fi
   fi
 

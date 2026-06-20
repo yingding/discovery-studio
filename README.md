@@ -30,7 +30,7 @@ export LOCATION=swedencentral
 ./deploy.sh prereqs            # one-time per sub (~1 min) — registers RPs, creates RG, assigns NSP/Reader roles
 ./deploy.sh 1                  # Stage 1: networking            (~1 min)
 ./deploy.sh 2                  # Stage 2: SC + node pool        (~10-20 min: SC ~8-15 min, np1 ~2-5 min)
-./deploy.sh 3                  # Stage 3: workspace + project   (~15-30 min)
+./deploy.sh 3                  # Stage 3: workspace + project   (~30-60 min)
 ./deploy.sh 4                  # Stage 4: 'Foundry User' role on workspace managed RG (signed-in az user, ~10s)
 ```
 

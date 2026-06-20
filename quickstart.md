@@ -12,6 +12,7 @@ End-to-end walkthrough of the helper scripts in this repo: [deploy.sh](deploy.sh
   - [Lifecycle](#lifecycle)
   - [Customisation](#customisation)
 - [`poll.sh` — watch a deployment in real time](#pollsh--watch-a-deployment-in-real-time)
+  - [Reading the output](#reading-the-output)
 - [`cost.sh` — live monthly estimate](#costsh--live-monthly-estimate)
 - [Connect](#connect)
 - [Troubleshooting](#troubleshooting)
@@ -117,12 +118,64 @@ Color-coded line per cycle: `[time | +elapsed] deployment=… state | sc=… | n
 INTERVAL=30 ./poll.sh               # custom poll interval
 STAGE=3 ./poll.sh                   # watch Stage 3 (workspace)
 MAX_UNKNOWN=10 ./poll.sh            # tolerate more transient empty polls
+STALE_MIN=10 ./poll.sh              # ignore terminal deployments older than N min (default 5)
 ```
+
+### Reading the output
+
+Each cycle prints up to three blocks:
+
+```text
+[00:06:14 | + 60m] deployment=stage3-20260620-230018  Succeeded | ws=Succeeded | chat=Succeeded | proj=Succeeded | stc=Succeeded
+├─ discovery
+│  ├─ supercomputers/sc-disc-yw-1=Succeeded
+│  ├─ nodepools/np1=Succeeded
+│  ├─ storagecontainers/stc-disc-yw-1=Succeeded
+│  ├─ workspaces/ws-disc-yw-1=Succeeded
+│  ├─ chatmodeldeployments/gpt-5-mini=Succeeded
+│  └─ projects/prj-disc-yw-1=Succeeded
+└─ managed
+   └─ mrg-dwsp-ws-disc-yw-1-s5znu6
+      ├─ resources=55 succeeded ✓
+      └─ nested-deploys=21 succeeded ✓
+```
+
+Mid-deploy the managed block expands when buckets contain in-progress / failed entries, so the math is visually summed:
+
+```text
+└─ managed
+   └─ mrg-dwsp-ws-disc-yw-1-s5znu6
+      ├─ resources=50 succeeded ✓
+      └─ nested-deploys=15 total
+         ├─ 3 in-progress (3 Running)
+         └─ 12 succeeded
+```
+
+**Header line** — `[wall-time | +elapsed] deployment=<name> <state> | <stage-specific labels>`
+- `<state>` is the outer ARM deployment state (`Accepted`, `Running`, `Succeeded`, `Failed`). When the deployment is older than `STALE_MIN` minutes a dim `(history, Nm old)` marker is appended so an old `Failed` is obviously historical.
+- Stage-specific labels for Stage 3: `ws=`, `chat=`, `proj=`, `stc=` — the individual workspace + children. `Missing` means "not yet created by this deploy", `Accepted`/`Running`/`Succeeded` are the live `provisioningState`.
+
+**`├─ discovery` tree** — every `Microsoft.Discovery/*` resource in your RG, one per line, with its current state. Lets you watch each piece appear.
+
+**`└─ managed` tree** — one block per Discovery-managed sibling RG (`mrg-dscmp-*` for the SC, `mrg-dwsp-*` for the workspace). Two child buckets per MRG:
+
+- `resources=` — count of Azure resources in that MRG, grouped by `provisioningState`. Compact `N succeeded ✓` when all green, or expanded sub-tree (`N total` + indented `in-progress / failed / succeeded` rows that sum to `N`) when mixed.
+- `nested-deploys=` — count of ARM `Microsoft.Resources/deployments` the Discovery RP ran inside that MRG (capability host setup, RBAC bindings, network wiring, etc.). Same compact/expanded rule.
+
+**Common Stage-3 reads:**
+
+| You see | Interpretation |
+|---|---|
+| `ws=Accepted` + `nested-deploys: 0 in-progress` + `resources: all Succeeded` | RP finalization lag — wait, don't touch |
+| `ws=Accepted` + `nested-deploys: N in-progress (Running)` | Foundry is still wiring post-provisioning (RBAC, capability host); normal |
+| `ws=Failed` | Real failure — script prints "Failed operations" with the inner error |
+| `chat=Missing` + `proj=Missing` after `ws=Succeeded` | Children still being PUT by Bicep/REST; usually 30s–3 min |
+| `nested-deploys: N failed` | Look at the failure dump; if it's `AccountIsNotSucceeded` re-read the [SAL section](#known-issue-orphan-legionservicelink-sal-on-agentsubnet) |
 
 | Exit code | Meaning |
 |---|---|
 | `0` | Deployment Succeeded |
-| `1` | Deployment Failed — failed operations are dumped to stdout |
+| `1` | Deployment Failed — failed operations are dumped to stdout (pretty-printed with the innermost error message in bold red) |
 | `2` | Gave up after `MAX_UNKNOWN` polls without a readable state |
 
 Run it in a second terminal while `./deploy.sh 2` or `./deploy.sh 3` works.

@@ -105,6 +105,19 @@ resource project 'Microsoft.Discovery/workspaces/projects@2026-06-01' = {
       discoveryStorageContainer.id
     ]
   }
+  // V2 projects require an existing ChatModelDeployment in 'Succeeded' state
+  // on the parent workspace. Bicep doesn't infer this dependency because the
+  // project resource has no symbolic reference to chatModelDeployment, so
+  // make it explicit — otherwise the project create can fire before the
+  // chat model finishes and fail with:
+  //   "Cannot create a V2 project: no ChatModelDeployment in Succeeded state
+  //    found in workspace '<ws>'."
+  // Only emit the dependsOn when the chat model is actually being deployed
+  // (chatModelName non-empty); if the user skipped the chat model, the
+  // project create will fail by design and the user must add one first.
+  dependsOn: empty(chatModelName) ? [] : [
+    chatModelDeployment
+  ]
 }
 
 output workspaceName string = workspace.name
