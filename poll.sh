@@ -51,37 +51,24 @@ is_terminal() {
   esac
 }
 
-# Print every Microsoft.Discovery/* resource in $RG as `<shortname>=<state>`.
-# Shortname = last segment of the type (e.g. supercomputers -> sc/np1 already
-# carry the parent prefix in their name) plus the resource name for clarity.
-# Returns empty string if nothing matches.
-discovery_status_line() {
+# Emit every Microsoft.Discovery/* resource in $RG as one line per resource:
+#   <label>\t<state>
+# Where <label> = <last-type-segment>/<resource-shortname>. Newline-separated.
+discovery_status_lines() {
   az resource list -g "$RG" \
     --query "[?starts_with(type, 'Microsoft.Discovery/')].{name:name, type:type, state:provisioningState}" \
     -o tsv 2>/dev/null \
-  | awk -v color_succ="$(printf '\033[1;32m')" \
-        -v color_warn="$(printf '\033[1;33m')" \
-        -v color_err="$(printf '\033[1;31m')" \
-        -v color_off="$(printf '\033[0m')" '
-    function colorize(s) {
-      if (s == "Succeeded") return color_succ s color_off
-      if (s == "Failed" || s == "Canceled") return color_err s color_off
-      if (s == "Running" || s == "Accepted" || s == "Creating" || s == "Updating") return color_warn s color_off
-      return s
-    }
+  | awk -v OFS='\t' '
     {
       name = $1
       type = $2
       state = $3
-      # short label = last "/" segment of the type
       n = split(type, parts, "/")
       label = parts[n]
-      # for parent/child names like sc-disc-yw/np1, just take the child name
       cn = split(name, np, "/")
       shortname = np[cn]
-      out = out " | " label "/" shortname "=" colorize(state)
+      print label "/" shortname, state
     }
-    END { print out }
   '
 }
 
@@ -192,20 +179,37 @@ while :; do
     "$(state_color "$dep_state")" \
     "$resources"
 
-  # Line 2: dynamic verbose list of every Microsoft.Discovery/* resource in $RG
-  # (covers everything, including types not in the short summary on line 1).
+  # Lines 2..N-1: dynamic verbose list of every Microsoft.Discovery/* resource.
+  # One resource per line for readability. Tree chars indicate hierarchy.
+  # Line N: managed RG summary.
   if [[ "$STAGE" != "1" ]]; then
-    verbose_line="$(discovery_status_line)"
-    if [[ -n "$verbose_line" ]]; then
-      printf '                       discovery%s\n' "$verbose_line"
-    fi
-  fi
-
-  # Line 3: managed RG summary (only when there's something to show)
-  if [[ "$STAGE" != "1" ]]; then
+    # Collect discovery items + managed line first so we know last-line markers.
+    disc_items=()
+    while IFS=$'\t' read -r label state; do
+      [[ -n "$label" ]] && disc_items+=("$label=$(state_color "$state")")
+    done < <(discovery_status_lines)
     mrg_line="$(managed_status_line)"
+
+    if (( ${#disc_items[@]} > 0 )); then
+      printf '├─ discovery\n'
+      last_idx=$((${#disc_items[@]} - 1))
+      for i in "${!disc_items[@]}"; do
+        if [[ -n "$mrg_line" ]]; then
+          # managed line follows -> all discovery items use ├ (non-last branch)
+          printf '│  ├─ %s\n' "${disc_items[$i]}"
+        else
+          # no managed line -> last discovery item uses └
+          if (( i == last_idx )); then
+            printf '│  └─ %s\n' "${disc_items[$i]}"
+          else
+            printf '│  ├─ %s\n' "${disc_items[$i]}"
+          fi
+        fi
+      done
+    fi
+
     if [[ -n "$mrg_line" ]]; then
-      printf '                       managed%s\n' "$mrg_line"
+      printf '└─ managed%s\n' "$mrg_line"
     fi
   fi
 
