@@ -18,11 +18,16 @@
 #   INTERVAL=30 ./poll.sh                  # custom poll interval (seconds)
 #   RG=rg-foo PREFIX=disc-bar ./poll.sh    # custom RG and naming prefix
 #   MAX_UNKNOWN=10 ./poll.sh               # tolerate up to N consecutive Unknown polls (default 5)
+#   STALE_MIN=10 ./poll.sh                 # treat terminal deployments older than N min as history
+#                                          # (default 5; set 0 to exit immediately like before).
+#                                          # Lets you keep the poller running across redeploys.
 #
 # Stops automatically when the deployment reaches a terminal state
-# (Succeeded / Failed / Canceled) or after MAX_UNKNOWN consecutive
-# unreadable polls. Exit codes: 0=Succeeded, 1=Failed (prints failed
-# operations), 2=gave up on Unknown streak.
+# (Succeeded / Failed / Canceled) **within the last STALE_MIN minutes**
+# or after MAX_UNKNOWN consecutive unreadable polls. Older terminal
+# deployments are reported once and then ignored so a new redeploy can
+# be picked up without restarting the script. Exit codes: 0=Succeeded,
+# 1=Failed (prints failed operations), 2=gave up on Unknown streak.
 
 set -uo pipefail
 
@@ -160,7 +165,10 @@ _bucket_summary() {
 }
 
 MAX_UNKNOWN="${MAX_UNKNOWN:-5}"   # consecutive 'Unknown' polls before giving up
+STALE_MIN="${STALE_MIN:-5}"       # treat terminal deployments older than N min as history (don't exit; keep polling for new ones)
 unknown_streak=0
+prev_dep_name=""
+prev_dep_state=""
 
 start_ts="$(date +%s)"
 echo "Polling RG=$RG prefix=$PREFIX stage=$STAGE every ${INTERVAL}s (Ctrl-C to stop)"
@@ -170,14 +178,17 @@ while :; do
   now="$(date +%H:%M:%S)"
   elapsed=$(( ( $(date +%s) - start_ts ) / 60 ))
 
-  # Latest stageN deployment
-  read -r dep_name dep_state < <(
+  # Latest stageN deployment. Use a multi-select hash so `-o tsv` emits
+  # all values on a single tab-separated line (multi-select list would
+  # be one value per line, breaking `read -r`).
+  read -r dep_name dep_state dep_ts < <(
     az deployment group list -g "$RG" \
-      --query "[?starts_with(name,'stage${STAGE}-')] | sort_by(@, &properties.timestamp) | [-1].[name, properties.provisioningState]" \
+      --query "[?starts_with(name,'stage${STAGE}-')] | sort_by(@, &properties.timestamp) | [-1].{name:name, state:properties.provisioningState, ts:properties.timestamp}" \
       -o tsv 2>/dev/null
   )
   dep_name="${dep_name:-<none>}"
   dep_state="${dep_state:-}"
+  dep_ts="${dep_ts:-}"
 
   # If the list query came back empty (transient API hiccup), fall back to
   # a direct `deployment show` on the last-known name so we don't get stuck
@@ -268,16 +279,49 @@ while :; do
   fi
 
   if is_terminal "$dep_state"; then
-    echo
-    echo "Deployment reached terminal state: $(state_color "$dep_state")"
-    if [[ "$dep_state" == "Failed" ]]; then
-      echo "Failed operations:"
-      az deployment operation group list -g "$RG" --name "$dep_name" \
-        --query "[?properties.provisioningState=='Failed'].{resource:properties.targetResource.resourceName, type:properties.targetResource.resourceType, err:properties.statusMessage.error.message}" \
-        -o jsonc
-      exit 1
+    # If the terminal deployment is older than STALE_MIN minutes, treat it
+    # as history and keep polling — a new deployment may be kicked off
+    # while the poller is running. Saves having to restart poll.sh after
+    # every retry. Set STALE_MIN=0 to revert to the old "exit immediately"
+    # behaviour.
+    if [[ "$dep_state" != "$prev_dep_state" || "$dep_name" != "$prev_dep_name" ]]; then
+      # Only print the "reached terminal state" line once per (dep, state).
+      echo
+      echo "Deployment '$dep_name' is in terminal state: $(state_color "$dep_state")"
+      if [[ "$dep_state" == "Failed" ]]; then
+        echo "Failed operations:"
+        az deployment operation group list -g "$RG" --name "$dep_name" \
+          --query "[?properties.provisioningState=='Failed'].{resource:properties.targetResource.resourceName, type:properties.targetResource.resourceType, err:properties.statusMessage.error.message}" \
+          -o jsonc
+      fi
+      prev_dep_name="$dep_name"
+      prev_dep_state="$dep_state"
     fi
-    exit 0
+
+    # Age check
+    dep_age_min=0
+    if [[ -n "$dep_ts" ]]; then
+      dep_age_min=$(python3 -c "
+import sys, datetime
+try:
+    ts = datetime.datetime.fromisoformat('$dep_ts'.replace('Z', '+00:00').split('+')[0] + '+00:00')
+    delta = datetime.datetime.now(datetime.timezone.utc) - ts
+    print(int(delta.total_seconds() / 60))
+except Exception:
+    print(0)
+" 2>/dev/null || echo 0)
+    fi
+
+    if (( dep_age_min >= STALE_MIN )); then
+      # Old terminal deployment — keep polling for a newer one.
+      sleep "$INTERVAL"
+      continue
+    else
+      # Recent terminal state — deployment just finished. Exit.
+      exit_code=0
+      [[ "$dep_state" == "Failed" ]] && exit_code=1
+      exit $exit_code
+    fi
   fi
 
   # Track consecutive 'Unknown' polls so we don't loop forever when ARM/Graph
