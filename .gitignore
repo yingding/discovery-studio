@@ -1,2 +1,6 @@
 *.json
 .vscode/**
+
+# Internal-only docs with real subscription / tenant / RG values.
+# Use the SUPPORT_TICKET.md (sanitized) for the public-facing version.
+*.private.md
