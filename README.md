@@ -8,7 +8,7 @@ Three-stage Bicep deployment based on the official [Azure quickstart](https://gi
 | 2 | [02-supercomputer.bicep](02-supercomputer.bicep) | UAMI · Storage · RBAC · Supercomputer · Node Pool |
 | 3 | [03-workspace.bicep](03-workspace.bicep) | Workspace · Chat Model · Project · Discovery Storage Container |
 
-For deep dives see [architecture.md](architecture.md) (resource graph, RBAC, network model) and [quickstart.md](quickstart.md) (full helper-script reference).
+For deep dives see [architecture.md](architecture.md) (resource graph, RBAC, network model), [roleconcept.md](roleconcept.md) (every RBAC role used and why), and [quickstart.md](quickstart.md) (full helper-script reference).
 
 ## Minimal quickstart
 
@@ -31,7 +31,7 @@ See [quickstart.md](quickstart.md) for the full subcommand reference, customisat
 ## Prerequisites
 
 1. **Platform/IT admin** persona roles. Quick way: run [`Set-DiscoveryRoleAssignments.ps1`](https://learn.microsoft.com/en-gb/azure/microsoft-discovery/how-to-assign-persona-roles).
-2. **Discovery NSP Perimeter Joiner** custom role + Reader role on the Discovery first-party SP. ✅ **`./deploy.sh prereqs` handles both automatically** (idempotent). Requires **Owner** or **User Access Administrator** on the subscription. Background and reference: [quickstart.md → setup](quickstart.md#setup) and [Microsoft Discovery NSP docs](https://learn.microsoft.com/en-gb/azure/microsoft-discovery/how-to-configure-network-security?tabs=azure-cli#assign-the-nsp-perimeter-joiner-role).
+2. **Discovery NSP Perimeter Joiner** custom role + Reader role on the Discovery first-party SP. ✅ **`./deploy.sh prereqs` handles both automatically** (idempotent). Requires **Owner** or **User Access Administrator** on the subscription. Background and reference: [roleconcept.md → subscription-scope](roleconcept.md#subscription-scope--discovery-first-party-sp), [quickstart.md → setup](quickstart.md#setup), and [Microsoft Discovery NSP docs](https://learn.microsoft.com/en-gb/azure/microsoft-discovery/how-to-configure-network-security?tabs=azure-cli#assign-the-nsp-perimeter-joiner-role).
 3. Quota in target region (`Microsoft.Compute` for the node pool SKU you pick).
 4. Required Azure resource providers — `./deploy.sh prereqs` registers the core 6; full list in [Discovery quickstart prerequisites](https://learn.microsoft.com/en-us/azure/microsoft-discovery/quickstart-infrastructure-portal#prerequisites).
 

@@ -44,7 +44,7 @@ All commands respect `RG`, `LOCATION`, `PREFIX`, and the CONFIG block at the top
 | `./deploy.sh nsp-role` | Just the role part of `prereqs` (run if you only need to re-assert the SP roles). | ✅ |
 | `./deploy.sh roles [user-upn-or-objectid]` | Assigns the platform-admin persona roles on the RG to the signed-in user (or the user you pass). | ✅ |
 
-Why the NSP Joiner role? The GA API `Microsoft.Discovery/*@2026-06-01` auto-creates a Network Security Perimeter and enrols your subscription. That join requires `Microsoft.Network/networkSecurityPerimeters/joinPerimeterRule/action` at subscription scope on the Discovery SP. Reader is also needed for "NSP associations in Enforced mode". The [official quickstart template](https://github.com/Azure/azure-quickstart-templates/tree/master/quickstarts/microsoft.discovery/discovery-infra-deployment) doesn't mention this because it still uses the preview API `@2026-02-01-preview` which skips the NSP step. See [Microsoft Discovery NSP docs](https://learn.microsoft.com/en-gb/azure/microsoft-discovery/how-to-configure-network-security?tabs=azure-cli#assign-the-nsp-perimeter-joiner-role).
+Why the NSP Joiner role? The GA API `Microsoft.Discovery/*@2026-06-01` auto-creates a Network Security Perimeter and enrols your subscription. That join requires `Microsoft.Network/networkSecurityPerimeters/joinPerimeterRule/action` at subscription scope on the Discovery SP. Reader is also needed for "NSP associations in Enforced mode". The [official quickstart template](https://github.com/Azure/azure-quickstart-templates/tree/master/quickstarts/microsoft.discovery/discovery-infra-deployment) doesn't mention this because it still uses the preview API `@2026-02-01-preview` which skips the NSP step. See [roleconcept.md → subscription-scope](roleconcept.md#subscription-scope--discovery-first-party-sp) for the full role table and [Microsoft Discovery NSP docs](https://learn.microsoft.com/en-gb/azure/microsoft-discovery/how-to-configure-network-security?tabs=azure-cli#assign-the-nsp-perimeter-joiner-role).
 
 ### Deploy
 
@@ -144,4 +144,4 @@ You may also need to assign yourself the **Foundry User** role on the workspace'
 | Poller stuck on `Unknown` | List query transient empty | Re-run; the script tolerates 5 consecutive Unknowns then exits rc=2 |
 | `./deploy.sh prereqs` fails on role create | Not Owner/UAA on the subscription | Ask a subscription owner to run `./deploy.sh nsp-role` once |
 
-For deeper architectural context (resource graph, network model, RBAC mapping), read [architecture.md](architecture.md).
+For deeper architectural context (resource graph, network model, RBAC mapping), read [architecture.md](architecture.md). For a complete RBAC role-by-role reference (who, where, why), read [roleconcept.md](roleconcept.md).
