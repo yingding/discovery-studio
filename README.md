@@ -13,7 +13,9 @@ See [architecture.md](architecture.md) for diagrams and per-resource details.
 ## Prerequisites
 
 1. **Platform/IT admin** persona roles. Quick way: run [`Set-DiscoveryRoleAssignments.ps1`](https://learn.microsoft.com/en-gb/azure/microsoft-discovery/how-to-assign-persona-roles).
-2. **Discovery NSP Perimeter Joiner** custom role created and assigned to the Discovery first-party SP — see [docs](https://learn.microsoft.com/en-gb/azure/microsoft-discovery/how-to-configure-network-security?tabs=azure-cli#assign-the-nsp-perimeter-joiner-role).
+2. **Discovery NSP Perimeter Joiner** custom role created and assigned to the Discovery first-party service principal. ✅ **`./deploy.sh prereqs` handles this automatically** (idempotent). Background: the GA API `Microsoft.Discovery/*@2026-06-01` auto-creates a Network Security Perimeter and tries to enroll your subscription into it, which requires `Microsoft.Network/networkSecurityPerimeters/joinPerimeterRule/action` at subscription scope on the Discovery SP. The [official Azure quickstart](https://github.com/Azure/azure-quickstart-templates/tree/master/quickstarts/microsoft.discovery/discovery-infra-deployment) doesn't mention it because it still uses the preview API `@2026-02-01-preview`. See [Microsoft Discovery NSP docs](https://learn.microsoft.com/en-gb/azure/microsoft-discovery/how-to-configure-network-security?tabs=azure-cli#assign-the-nsp-perimeter-joiner-role).
+   - Requires **Owner** or **User Access Administrator** on the subscription to create the custom role + assignment (one-time per subscription).
+   - Run standalone with `./deploy.sh nsp-role`.
 3. Quota in target region (`Microsoft.Compute` for the node pool SKU you pick).
 4. Required Azure resource providers registered on your subscription. `./deploy.sh prereqs` registers the core 6 needed by this template; the full list (≈24 providers) is documented in [Discovery quickstart prerequisites](https://learn.microsoft.com/en-us/azure/microsoft-discovery/quickstart-infrastructure-portal#prerequisites).
 

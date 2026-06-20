@@ -114,13 +114,13 @@ Other SKU examples: `Standard_D4s_v6` (CPU-only), `Standard_NC24ads_A100_v4` (A1
 ## Key design points
 
 - **Independently deployable stages** — re-run any stage without redeploying the others. `existing` references look up by name.
-- **Network-hardened by default** — Discovery requires the VNet + delegated subnets. The NSP perimeter joiner role is a *prerequisite*, not in this template.
+- **Network-hardened by default** — Discovery requires the VNet + delegated subnets. The GA API `Microsoft.Discovery/*@2026-06-01` also auto-creates a Network Security Perimeter inside the managed `mrg-dscmp-*` RG and enrolls your subscription; this requires the Discovery first-party SP to hold the **Discovery NSP Perimeter Joiner** custom role at subscription scope (see [docs](https://learn.microsoft.com/en-gb/azure/microsoft-discovery/how-to-configure-network-security?tabs=azure-cli#assign-the-nsp-perimeter-joiner-role)). `./deploy.sh prereqs` provisions and assigns this role idempotently (it is *not* part of the Bicep templates because role definitions are subscription-scoped, not RG-scoped).
 - **Identity-only auth to storage** — `allowSharedKeyAccess: false`; the UAMI's RBAC grants are what enable blob I/O.
 - **Scale-to-zero compute** — node pool costs nothing when idle.
 - **Idempotent role assignments** — names use `guid(...)` so re-running Stage 2 doesn't error.
 
 ## What is *not* in this template (handle once, out of band)
 
-- The custom **Discovery NSP Perimeter Joiner** role + assignment to the Discovery first-party service principal.
+- ~~The custom **Discovery NSP Perimeter Joiner** role + assignment~~ — **now handled by `./deploy.sh prereqs`** via the `ensure_nsp_joiner_role` function (subscription-scoped, idempotent). Reference: [Microsoft Discovery NSP docs](https://learn.microsoft.com/en-gb/azure/microsoft-discovery/how-to-configure-network-security?tabs=azure-cli#assign-the-nsp-perimeter-joiner-role).
 - Persona role assignments (Platform Admin etc.) — assign via `./deploy.sh roles` or the [official PowerShell script](https://learn.microsoft.com/en-gb/azure/microsoft-discovery/how-to-assign-persona-roles).
 - Resource provider registration — handled by `./deploy.sh prereqs`.

@@ -2,16 +2,22 @@
 # Staged Microsoft Discovery deployment.
 #
 # Usage:
-#   ./deploy.sh build                       # local Bicep compile/lint (no Azure call)
-#   ./deploy.sh prereqs                     # register providers + create RG
+#   ./deploy.sh build                        # local Bicep compile/lint (no Azure call)
+#   ./deploy.sh prereqs                      # register providers + create RG
 #   ./deploy.sh roles [user-upn-or-objectid] # assign Discovery Platform Admin persona roles on RG
 #                                            # (defaults to the signed-in user)
-#   ./deploy.sh 1 | network                 # Stage 1: VNet + subnets
-#   ./deploy.sh 2 | supercomputer           # Stage 2: UAMI + Storage + RBAC + SC + NodePool
-#   ./deploy.sh 3 | workspace               # Stage 3: Workspace + ChatModel + Project + Container
-#   ./deploy.sh all                         # prereqs + 1 + 2 + 3
-#   ./deploy.sh outputs                     # list deployed resources
-#   ./deploy.sh teardown                    # delete the resource group
+#   ./deploy.sh nsp-role                     # ensure the Discovery first-party SP has the
+#                                            # "Discovery NSP Perimeter Joiner" custom role at
+#                                            # subscription scope (auto-run by `prereqs`).
+#                                            # Required by Microsoft.Discovery/*@2026-06-01 GA API
+#                                            # which auto-creates an NSP and enrolls the sub.
+#                                            # Docs: https://learn.microsoft.com/en-gb/azure/microsoft-discovery/how-to-configure-network-security?tabs=azure-cli#assign-the-nsp-perimeter-joiner-role
+#   ./deploy.sh 1 | network                  # Stage 1: VNet + subnets
+#   ./deploy.sh 2 | supercomputer            # Stage 2: UAMI + Storage + RBAC + SC + NodePool
+#   ./deploy.sh 3 | workspace                # Stage 3: Workspace + ChatModel + Project + Container
+#   ./deploy.sh all                          # prereqs + 1 + 2 + 3
+#   ./deploy.sh outputs                      # list deployed resources
+#   ./deploy.sh teardown                     # delete the resource group
 #
 # Configure RG/location via env vars:
 #   RG=rg-discovery-yw-uno LOCATION=swedencentral ./deploy.sh 1
@@ -96,6 +102,8 @@ run_prereqs() {
     printf '    %-30s creating in %s with tag purpose=%s...\n' "$RG" "$LOCATION" "$TAG_PURPOSE"
     az group create --name "$RG" --location "$LOCATION" --tags purpose="$TAG_PURPOSE" -o none
   fi
+
+  ensure_nsp_joiner_role
 }
 
 run_stage() {
@@ -127,6 +135,83 @@ run_build() {
     printf '%-30s ' "$f"
     az bicep build --file "$f" --stdout > /dev/null && echo OK
   done
+}
+
+# Microsoft Discovery first-party application id (constant across all tenants).
+DISCOVERY_APP_ID="92c174ac-8e41-4815-a1b7-d81b19ab03ce"
+NSP_JOINER_ROLE_NAME="Discovery NSP Perimeter Joiner"
+
+# Idempotent: ensures the Discovery first-party SP can join this subscription
+# to the NSP it manages inside its mrg-dscmp-* infra RG. Without this, the
+# supercomputer resource fails with LinkedAuthorizationFailed on
+# Microsoft.Network/networkSecurityPerimeters/joinPerimeterRule/action.
+#
+# Why this is needed (and not in the upstream quickstart):
+#   The GA API Microsoft.Discovery/*@2026-06-01 auto-creates an NSP inside
+#   the managed mrg-dscmp-* RG and enrolls your subscription. The Discovery
+#   first-party SP needs `joinPerimeterRule/action` at subscription scope to
+#   perform that enrollment. The official quickstart at
+#   https://github.com/Azure/azure-quickstart-templates/tree/master/quickstarts/microsoft.discovery/discovery-infra-deployment
+#   still uses the preview API @2026-02-01-preview which skips this step.
+#
+# Docs: https://learn.microsoft.com/en-gb/azure/microsoft-discovery/how-to-configure-network-security?tabs=azure-cli#assign-the-nsp-perimeter-joiner-role
+ensure_nsp_joiner_role() {
+  log "Ensuring '$NSP_JOINER_ROLE_NAME' role exists and is assigned to Discovery SP..."
+  local sub_scope="/subscriptions/$SUBSCRIPTION"
+  local sleep_after=0
+
+  # 1. Resolve the Discovery SP object id in this tenant.
+  local sp_oid
+  sp_oid="$(az ad sp show --id "$DISCOVERY_APP_ID" --query id -o tsv 2>/dev/null || true)"
+  if [[ -z "$sp_oid" ]]; then
+    printf '  Discovery SP not yet in tenant. Registering provider + creating SP...\n'
+    az provider register -n Microsoft.Discovery --wait 1>/dev/null
+    az ad sp create --id "$DISCOVERY_APP_ID" -o none 2>/dev/null || true
+    sp_oid="$(az ad sp show --id "$DISCOVERY_APP_ID" --query id -o tsv 2>/dev/null || true)"
+  fi
+  if [[ -z "$sp_oid" ]]; then
+    echo "ERROR: Could not resolve Discovery SP object id for app $DISCOVERY_APP_ID." >&2
+    echo "       Ask your Entra admin to consent the Discovery app in this tenant." >&2
+    exit 1
+  fi
+  printf '  Discovery SP object id: %s\n' "$sp_oid"
+
+  # 2. Create the custom role if missing.
+  local role_id
+  role_id="$(az role definition list --name "$NSP_JOINER_ROLE_NAME" --scope "$sub_scope" --query "[0].name" -o tsv 2>/dev/null || true)"
+  if [[ -z "$role_id" ]]; then
+    printf '  Creating custom role definition...\n'
+    az role definition create --role-definition "{
+      \"Name\": \"$NSP_JOINER_ROLE_NAME\",
+      \"IsCustom\": true,
+      \"Description\": \"Allows Microsoft Discovery to enroll the subscription in its managed NSP.\",
+      \"Actions\": [\"Microsoft.Network/networkSecurityPerimeters/joinPerimeterRule/action\"],
+      \"AssignableScopes\": [\"$sub_scope\"]
+    }" -o none
+    sleep_after=20
+  else
+    printf '  Custom role already exists, skipping create.\n'
+  fi
+
+  # 3. Assign the role to the Discovery SP at subscription scope, if missing.
+  local assigned
+  assigned="$(az role assignment list --assignee "$sp_oid" --role "$NSP_JOINER_ROLE_NAME" --scope "$sub_scope" --query "[0].id" -o tsv 2>/dev/null || true)"
+  if [[ -z "$assigned" ]]; then
+    printf '  Assigning role to Discovery SP at subscription scope...\n'
+    az role assignment create \
+      --assignee-object-id "$sp_oid" \
+      --assignee-principal-type ServicePrincipal \
+      --role "$NSP_JOINER_ROLE_NAME" \
+      --scope "$sub_scope" -o none
+    sleep_after=30
+  else
+    printf '  Role assignment already exists, skipping.\n'
+  fi
+
+  if (( sleep_after > 0 )); then
+    printf '  Sleeping %ds for RBAC propagation...\n' "$sleep_after"
+    sleep "$sleep_after"
+  fi
 }
 
 # Persona roles required for a Microsoft Discovery Platform Administrator user.
@@ -178,7 +263,9 @@ run_roles() {
 }
 
 stage_1() { run_stage 1 01-network.bicep        "${STAGE1_PARAMS[@]}"; }
-stage_2() { run_stage 2 02-supercomputer.bicep  "${STAGE2_PARAMS[@]}"; }
+stage_2() {
+  run_stage 2 02-supercomputer.bicep  "${STAGE2_PARAMS[@]}"
+}
 
 stage_3() {
   # Stage 3 needs the storage account name produced by Stage 2.
@@ -200,6 +287,7 @@ case "$cmd" in
   build)                       run_build ;;
   prereqs)                     run_prereqs ;;
   roles)                       run_roles "${2:-}" ;;
+  nsp-role)                    ensure_nsp_joiner_role ;;
   1|network)                   stage_1 ;;
   2|supercomputer|sc)          stage_2 ;;
   3|workspace|ws)              stage_3 ;;
