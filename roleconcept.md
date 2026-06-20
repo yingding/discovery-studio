@@ -104,6 +104,26 @@ Why two roles for one Stage 4? They live in two different Azure resource graphs:
 | `Microsoft Discovery Platform Contributor (Preview)` *(default)* | Scientist persona — investigations + shared sessions + data actions |
 | `Microsoft Discovery Platform Reader (Preview)` | Observer/reviewer — read-only access to conversations and shared research data |
 
+**Scope alternatives** (override via `STAGE4_DISC_SCOPE=` env var). Azure RBAC inherits downward, so a role assigned higher in the hierarchy flows to every child resource:
+
+| Scope | Path | Use case |
+|---|---|---|
+| `rg` | `/subscriptions/<sub>/resourceGroups/rg-<PREFIX>` | Broadest — covers every Discovery resource in the RG (current + future workspaces, supercomputers). Matches the MSFT [Scientist persona](https://learn.microsoft.com/azure/microsoft-discovery/concept-role-assignments#roles-required-by-persona) recommendation. Pick this for a team-shared Discovery sandbox. |
+| `workspace` *(default)* | `.../workspaces/ws-<PREFIX>` | Workspace-wide — covers the workspace plus all its children (chat model, every project, storage container). Pick this for the common "one user owns one workspace" pattern. |
+| `project` | `.../workspaces/ws-<PREFIX>/projects/prj-<PREFIX>` | Tightest — only this project's data. Suitable for external collaborators with access to one investigation. **Caveat:** Discovery Studio's UI normally lists the workspace to find its projects, so project-only scope may hide siblings or fail to enumerate. Pair with a separate workspace-scope Reader assignment if the user still needs to browse. |
+
+The deploy script only wires up `rg` and `workspace` (the two most common). For `project` scope, assign manually:
+
+```bash
+PRJ_ID=$(az resource show -g rg-disc-yw-1 \
+  --resource-type Microsoft.Discovery/workspaces/projects \
+  --name ws-disc-yw-1/prj-disc-yw-1 --query id -o tsv)
+az role assignment create \
+  --assignee colleague@example.com \
+  --role "Microsoft Discovery Platform Contributor (Preview)" \
+  --scope "$PRJ_ID"
+```
+
 ## Permission flow diagrams
 
 ### Stage 2 create path (where things break without RBAC)
