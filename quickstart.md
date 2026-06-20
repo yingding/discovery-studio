@@ -4,7 +4,7 @@ End-to-end walkthrough of the helper scripts in this repo: [deploy.sh](deploy.sh
 
 ## Contents
 
-- [TL;DR](#tldr)
+- [Quick start](#quick-start)
 - [Prerequisites (once per subscription)](#prerequisites-once-per-subscription)
 - [`deploy.sh` subcommand reference](#deploysh-subcommand-reference)
   - [Setup](#setup)
@@ -16,7 +16,7 @@ End-to-end walkthrough of the helper scripts in this repo: [deploy.sh](deploy.sh
 - [Connect](#connect)
 - [Troubleshooting](#troubleshooting)
 
-## TL;DR
+## Quick start
 
 ```bash
 git clone git@github.com:yingding/discovery-studio.git
