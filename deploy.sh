@@ -828,11 +828,21 @@ _run_teardown() {
     return 0
   fi
 
-  # 5. Wait until the RG is fully gone.
+  # 5. Wait until the RG is fully gone. Also surface the state of the
+  # Discovery-managed RGs (mrg-dscmp-*, mrg-dwsp-*) while we wait, because
+  # they're what usually hold up the parent RG delete.
   local deadline=$(( $(date +%s) + 30 * 60 ))
   while :; do
     if ! az group show -n "$RG" -o none 2>/dev/null; then
       log "Teardown done: $RG is gone."
+      # Final note about any lingering managed RGs (rare but possible).
+      local leftover_mrgs
+      leftover_mrgs=$(az group list \
+        --query "[?starts_with(name, 'mrg-dscmp-${sc_name}-') || starts_with(name, 'mrg-dwsp-${ws_name}-')].name" \
+        -o tsv 2>/dev/null || true)
+      if [[ -n "$leftover_mrgs" ]]; then
+        log "Note: managed RG(s) still present (deleting async): ${leftover_mrgs//$'\n'/, }"
+      fi
       return 0
     fi
     local now=$(date +%s)
@@ -841,7 +851,24 @@ _run_teardown() {
       return 1
     fi
     local left=$(( (deadline - now) / 60 ))
-    log "  ... still deleting $RG (${left}m left)"
+
+    # Per-cycle MRG summary: print each on its own line so the user can
+    # see why the parent RG isn't disappearing yet.
+    local mrgs
+    mrgs=$(az group list \
+      --query "[?starts_with(name, 'mrg-dscmp-${sc_name}-') || starts_with(name, 'mrg-dwsp-${ws_name}-')].name" \
+      -o tsv 2>/dev/null || true)
+    if [[ -z "$mrgs" ]]; then
+      log "  ... still deleting $RG (${left}m left); managed RGs: all gone"
+    else
+      log "  ... still deleting $RG (${left}m left); managed RGs still present:"
+      local mrg mrg_state mrg_count
+      for mrg in $mrgs; do
+        mrg_state=$(az group show -n "$mrg" --query properties.provisioningState -o tsv 2>/dev/null || echo Unknown)
+        mrg_count=$(az resource list -g "$mrg" --query "length(@)" -o tsv 2>/dev/null || echo "?")
+        printf '      %s: %s (%s resources left)\n' "$mrg" "$mrg_state" "$mrg_count"
+      done
+    fi
     sleep 60
   done
 }
