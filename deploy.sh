@@ -19,8 +19,9 @@
 #                                            # MCAPS_ASSIGNMENT_NAMES (default: MCAPSGovDeployPolicies
 #                                            # and MCAPSGovDenyPolicies). The Deny one is what
 #                                            # blocks the GPU VMSS the Discovery node pool creates.
-#                                            # Only needed on MCAPS-governed subscriptions (e.g.
-#                                            # MngEnvMCAP*). Auto-run by `prereqs` when MCAPS_EXEMPTION=1.
+#                                            # `prereqs` auto-runs this on MCAPS-governed subs
+#                                            # (subscription name matches MngEnvMCAP*). Force on/off
+#                                            # via MCAPS_EXEMPTION=1|0 (default: auto).
 #                                            # Skips create when an exemption (self- or admin-created,
 #                                            # any scope) already targets the assignment.
 #                                            # Category defaults to Mitigated, expires 2030-01-01.
@@ -32,13 +33,22 @@
 #   ./deploy.sh 1 | network                  # Stage 1: VNet + subnets
 #   ./deploy.sh 2 | supercomputer            # Stage 2: UAMI + Storage + RBAC + SC + NodePool
 #   ./deploy.sh 3 | workspace                # Stage 3: Workspace + ChatModel + Project + Container
-#   ./deploy.sh all                          # prereqs + 1 + 2 + 3
+#   ./deploy.sh 4 [user-upn-or-objectid]     # Stage 4 (post-3): assign 'Foundry User' to the signed-in
+#                                            # user (or the user you pass) on the workspace's managed
+#                                            # RG so Discovery Studio can open the workspace.
+#                                            # Idempotent.
+#                                            # Examples:
+#                                            #   ./deploy.sh 4                          # signed-in az user
+#                                            #   ./deploy.sh 4 alice@example.com        # specific UPN
+#                                            #   ./deploy.sh 4 11111111-2222-3333-...   # specific object id
+#   ./deploy.sh all                          # prereqs + 1 + 2 + 3 + 4
 #   ./deploy.sh outputs                      # list deployed resources
 #   ./deploy.sh teardown                     # delete the resource group
 #
 # Configure RG/location via env vars:
 #   RG=rg-discovery-yw-uno LOCATION=swedencentral ./deploy.sh 1
-#   MCAPS_EXEMPTION=1 ./deploy.sh prereqs                          # opt-in MCAPS exemption check
+#   MCAPS_EXEMPTION=0 ./deploy.sh prereqs                          # disable MCAPS check even on MCAPS sub
+#   MCAPS_EXEMPTION=1 ./deploy.sh prereqs                          # force MCAPS check on non-MCAPS sub
 
 set -euo pipefail
 
@@ -67,12 +77,17 @@ NODE_POOL_PRIORITY="${NODE_POOL_PRIORITY:-Regular}"        # Regular | Spot
 # Stage 3 — Workspace / Chat model
 CHAT_MODEL_NAME="${CHAT_MODEL_NAME:-gpt-5-mini}"            # set to "" to skip chat model
 
-# MCAPS Policy exemption (opt-in)
-# Set MCAPS_EXEMPTION=1 to auto-create a subscription-scope exemption
-# against the MCAPSGov initiative during `./deploy.sh prereqs`.
-# Only needed on MCAPS-governed subscriptions where the deny policy blocks
-# the GPU VMSS the Discovery node pool creates.
-MCAPS_EXEMPTION="${MCAPS_EXEMPTION:-0}"
+# MCAPS Policy exemption
+# Auto-detected: enabled when the subscription name matches the
+# Microsoft-tenant MCAPS pattern (e.g. "ME-MngEnvMCAP..."); skipped
+# otherwise. Force on/off with MCAPS_EXEMPTION=1 / MCAPS_EXEMPTION=0.
+# Only relevant on MCAPS-governed subs where the deny policy blocks the
+# GPU VMSS the Discovery node pool creates.
+MCAPS_EXEMPTION="${MCAPS_EXEMPTION:-auto}"
+# Bash glob pattern matched against `az account show --query name` to
+# decide whether a subscription is MCAPS-governed. Edit or override if
+# your tenant uses a different naming convention.
+MCAPS_SUBSCRIPTION_PATTERN="${MCAPS_SUBSCRIPTION_PATTERN:-*MngEnvMCAP*}"
 MCAPS_EXEMPTION_NAME="${MCAPS_EXEMPTION_NAME:-discovery-mcapsgov-${PREFIX}}"
 # Which MCAPSGov assignments to check/exempt. Comma-separated list of
 # assignment names. Defaults cover both the Deploy/Modify initiative and
@@ -160,7 +175,24 @@ _run_prereqs() {
   fi
 
   ensure_nsp_joiner_role
-  if [[ "$MCAPS_EXEMPTION" == "1" ]]; then
+
+  # MCAPS exemption check: auto-detect (or honor explicit on/off).
+  local mcaps_run=0
+  case "$MCAPS_EXEMPTION" in
+    1|true|on|yes) mcaps_run=1 ;;
+    0|false|off|no) mcaps_run=0 ;;
+    auto|*)
+      local sub_name
+      sub_name="$(az account show --query name -o tsv 2>/dev/null || true)"
+      if [[ "$sub_name" == $MCAPS_SUBSCRIPTION_PATTERN ]]; then
+        log "Detected MCAPS-governed subscription ($sub_name); running exemption check."
+        mcaps_run=1
+      else
+        printf '    %-30s sub="%s" doesn'"'"'t match %s, skipping MCAPS check\n' "MCAPS exemption" "$sub_name" "$MCAPS_SUBSCRIPTION_PATTERN"
+      fi
+      ;;
+  esac
+  if (( mcaps_run )); then
     ensure_mcaps_exemption
   fi
 }
@@ -452,8 +484,156 @@ stage_3() {
     echo "ERROR: could not find Stage 2 deployment output 'storageAccountName' in $RG. Run stage 2 first." >&2
     exit 1
   fi
-  log "Stage 3: using storageAccountName=$sa from Stage 2 outputs."
-  run_stage 3 03-workspace.bicep "${STAGE3_PARAMS[@]}" storageAccountName="$sa"
+
+  # =====================================================================
+  # Discovery RP @2026-06-01 workspace-stuck bug — DO NOT re-PUT the
+  # workspace if it already exists. Sending another PUT/PATCH while the
+  # workspace is Succeeded (or even Accepted) can flip it into Accepted
+  # state where the RP stops responding, refuses all further writes
+  # with InvalidResourceOperation, and may sit there for 30-60+ minutes
+  # before self-resolving. Once stuck, the only deterministic recovery
+  # is to delete the workspace (which also tears down its mrg-dwsp-* RG
+  # ~30-60 min of provisioning) and re-create.
+  #
+  # Strategy:
+  #   - If workspace doesn't exist  -> full Bicep (creates everything).
+  #   - If workspace exists         -> skip Bicep entirely. Wait for ws
+  #                                    to reach Succeeded, then PUT only
+  #                                    the missing children (stc, chat,
+  #                                    project) via direct ARM REST.
+  # The wait timeout defaults to 60 min because we've observed the RP
+  # taking 35+ min between Accepted -> Succeeded on the first cycle.
+  # =====================================================================
+  if _stage3_workspace_already_provisioned; then
+    log "Stage 3: workspace already exists; skipping Bicep re-PUT and only"
+    log "         creating missing children via direct REST (avoids RP"
+    log "         re-PUT bug — see comments in stage_3())."
+    time_step "Stage 3 (children-only)" _stage3_children_via_rest "$sa"
+  else
+    log "Stage 3: workspace not present; running full Bicep template."
+    log "Stage 3: using storageAccountName=$sa from Stage 2 outputs."
+    run_stage 3 03-workspace.bicep "${STAGE3_PARAMS[@]}" storageAccountName="$sa"
+  fi
+}
+
+# Returns 0 if ws-<PREFIX> exists at all (Succeeded or in-flight). Used to
+# decide whether to run the full Bicep template or just create missing
+# children. We wait for Succeeded inside _stage3_children_via_rest so that
+# Accepted/Running is still considered "already provisioned" here.
+_stage3_workspace_already_provisioned() {
+  local state
+  state="$(az rest --method get \
+    --uri "https://management.azure.com/subscriptions/${SUBSCRIPTION}/resourceGroups/${RG}/providers/Microsoft.Discovery/workspaces/ws-${PREFIX}?api-version=2026-06-01" \
+    --query properties.provisioningState -o tsv 2>/dev/null || true)"
+  [[ -n "$state" ]]
+}
+
+# Wait for ws-<PREFIX> to reach 'Succeeded' (per direct REST). Times out
+# after MAX_WAIT_MIN minutes. Returns non-zero on timeout / unrecoverable
+# state. Default 60 min because the Discovery RP has been observed to
+# take 35+ min to drive a freshly-Accepted workspace to Succeeded after
+# any inadvertent write. Override with WS_WAIT_MIN.
+_wait_workspace_succeeded() {
+  local max_min="${1:-${WS_WAIT_MIN:-60}}"
+  local interval=15
+  local elapsed=0 state
+  while (( elapsed < max_min * 60 )); do
+    state="$(az rest --method get \
+      --uri "https://management.azure.com/subscriptions/${SUBSCRIPTION}/resourceGroups/${RG}/providers/Microsoft.Discovery/workspaces/ws-${PREFIX}?api-version=2026-06-01" \
+      --query properties.provisioningState -o tsv 2>/dev/null || true)"
+    case "$state" in
+      Succeeded) return 0 ;;
+      Failed|Canceled) echo "ERROR: workspace in terminal-failure state '$state'." >&2; return 1 ;;
+      "") echo "ERROR: workspace not found." >&2; return 1 ;;
+      *) printf '  workspace state=%s (waited %ds, will retry in %ds)...\n' "$state" "$elapsed" "$interval" ;;
+    esac
+    sleep "$interval"
+    elapsed=$(( elapsed + interval ))
+  done
+  echo "ERROR: workspace did not reach Succeeded within ${max_min} min." >&2
+  return 1
+}
+
+# Get a child resource's provisioningState via REST. Echoes the state, or
+# empty if the resource doesn't exist. Args: <child-path-from-workspace>.
+_child_state() {
+  local child="$1"
+  az rest --method get \
+    --uri "https://management.azure.com/subscriptions/${SUBSCRIPTION}/resourceGroups/${RG}/providers/Microsoft.Discovery/workspaces/ws-${PREFIX}/${child}?api-version=2026-06-01" \
+    --query properties.provisioningState -o tsv 2>/dev/null || true
+}
+
+# Generic REST PUT helper. Args: <uri> <body-json> <description>.
+_arm_put() {
+  local uri="$1" body="$2" desc="$3"
+  printf '  PUT %s ...\n' "$desc"
+  if az rest --method put --uri "$uri" --body "$body" -o none 2>/tmp/az-put-err; then
+    printf '  %s: created\n' "$desc"
+  else
+    printf '  %s: FAILED\n' "$desc"
+    sed 's/^/    /' /tmp/az-put-err >&2
+    rm -f /tmp/az-put-err
+    return 1
+  fi
+  rm -f /tmp/az-put-err
+}
+
+# Create the Stage 3 children (storageContainer, chatModelDeployment,
+# project) directly via ARM REST when workspace already exists. Skips any
+# child that's already Succeeded. Arg: <storageAccountName>.
+_stage3_children_via_rest() {
+  local sa="$1"
+  local sub="$SUBSCRIPTION"
+  local stc_name="stc-${PREFIX}"
+  local prj_name="prj-${PREFIX}"
+  # Mirror Bicep default: take(replace(chatModelName,'.','-'), 24)
+  local cmd_default="$(printf '%s' "${CHAT_MODEL_NAME:-chat}" | tr '.' '-' | cut -c1-24)"
+  local cmd_name="$cmd_default"
+
+  log "Waiting for workspace ws-${PREFIX} to be Succeeded (REST GET, up to ${WS_WAIT_MIN:-60} min)..."
+  _wait_workspace_succeeded || return 1
+
+  # Discovery Storage Container (not a workspace child, but Stage 3 owns it).
+  local stc_state
+  stc_state="$(az rest --method get \
+    --uri "https://management.azure.com/subscriptions/${sub}/resourceGroups/${RG}/providers/Microsoft.Discovery/storageContainers/${stc_name}?api-version=2026-06-01" \
+    --query properties.provisioningState -o tsv 2>/dev/null || true)"
+  if [[ "$stc_state" == "Succeeded" ]]; then
+    printf '  storageContainer %s: already Succeeded, skipping\n' "$stc_name"
+  else
+    _arm_put \
+      "https://management.azure.com/subscriptions/${sub}/resourceGroups/${RG}/providers/Microsoft.Discovery/storageContainers/${stc_name}?api-version=2026-06-01" \
+      "{\"location\":\"${LOCATION}\",\"tags\":{\"purpose\":\"${TAG_PURPOSE}\"},\"properties\":{\"storageStore\":{\"kind\":\"AzureStorageBlob\",\"storageAccountId\":\"/subscriptions/${sub}/resourceGroups/${RG}/providers/Microsoft.Storage/storageAccounts/${sa}\"}}}" \
+      "storageContainer/${stc_name}" || return 1
+  fi
+
+  # Chat model deployment (skip if CHAT_MODEL_NAME is empty).
+  if [[ -n "$CHAT_MODEL_NAME" ]]; then
+    local cmd_state
+    cmd_state="$(_child_state "chatModelDeployments/${cmd_name}")"
+    if [[ "$cmd_state" == "Succeeded" ]]; then
+      printf '  chatModelDeployment %s: already Succeeded, skipping\n' "$cmd_name"
+    else
+      _arm_put \
+        "https://management.azure.com/subscriptions/${sub}/resourceGroups/${RG}/providers/Microsoft.Discovery/workspaces/ws-${PREFIX}/chatModelDeployments/${cmd_name}?api-version=2026-06-01" \
+        "{\"location\":\"${LOCATION}\",\"tags\":{\"purpose\":\"${TAG_PURPOSE}\"},\"properties\":{\"modelFormat\":\"OpenAI\",\"modelName\":\"${CHAT_MODEL_NAME}\"}}" \
+        "chatModelDeployment/${cmd_name}" || return 1
+    fi
+  fi
+
+  # Project (depends on storageContainer).
+  local prj_state
+  prj_state="$(_child_state "projects/${prj_name}")"
+  if [[ "$prj_state" == "Succeeded" ]]; then
+    printf '  project %s: already Succeeded, skipping\n' "$prj_name"
+  else
+    _arm_put \
+      "https://management.azure.com/subscriptions/${sub}/resourceGroups/${RG}/providers/Microsoft.Discovery/workspaces/ws-${PREFIX}/projects/${prj_name}?api-version=2026-06-01" \
+      "{\"location\":\"${LOCATION}\",\"tags\":{\"purpose\":\"${TAG_PURPOSE}\"},\"properties\":{\"storageContainerIds\":[\"/subscriptions/${sub}/resourceGroups/${RG}/providers/Microsoft.Discovery/storageContainers/${stc_name}\"]}}" \
+      "project/${prj_name}" || return 1
+  fi
+
+  log "Stage 3 children-only flow complete. Refresh Discovery Studio to open ws-${PREFIX}/${prj_name}."
 }
 
 _run_pause() {
@@ -480,6 +660,62 @@ _run_pause() {
 }
 run_pause() { time_step "Pause" _run_pause; }
 
+# Stage 4: post-deployment role grant. The Discovery workspace creates a
+# Foundry-managed RG (typically `mrg-<workspaceName>-<region>-<random>`)
+# that hosts the Azure AI Foundry account + project. Discovery Studio
+# requires the 'Foundry User' role on that managed RG before a user can
+# open the workspace. Default target: the signed-in az CLI user.
+_stage_4() {
+  local target="${1:-}"
+  local ws_name="ws-${PREFIX}"
+  local role="Foundry User"
+
+  local principal_id principal_type display
+  if [[ -z "$target" ]]; then
+    principal_id="$(az ad signed-in-user show --query id -o tsv)"
+    display="$(az ad signed-in-user show --query userPrincipalName -o tsv)"
+    principal_type=User
+  else
+    principal_id="$(az ad user show --id "$target" --query id -o tsv 2>/dev/null || echo "$target")"
+    display="$target"
+    principal_type=User
+  fi
+
+  log "Stage 4: resolving workspace $ws_name managed RG..."
+  local mrg
+  mrg="$(az resource show -g "$RG" \
+    --resource-type Microsoft.Discovery/workspaces \
+    --name "$ws_name" \
+    --query properties.managedResourceGroup -o tsv 2>/dev/null || true)"
+  if [[ -z "$mrg" ]]; then
+    echo "ERROR: workspace $ws_name not found in $RG (or has no managedResourceGroup). Run ./deploy.sh 3 first." >&2
+    exit 1
+  fi
+  local scope="/subscriptions/${SUBSCRIPTION}/resourceGroups/${mrg}"
+  log "Workspace managed RG: $mrg"
+  log "Assigning '$role' to $display ($principal_id) on $scope"
+
+  if az role assignment list --assignee "$principal_id" --role "$role" --scope "$scope" --query "[0].id" -o tsv 2>/dev/null | grep -q .; then
+    printf '  %-58s already assigned\n' "$role"
+  else
+    if az role assignment create \
+        --assignee-object-id "$principal_id" \
+        --assignee-principal-type "$principal_type" \
+        --role "$role" \
+        --scope "$scope" -o none 2>/tmp/az-stage4-err; then
+      printf '  %-58s assigned\n' "$role"
+    else
+      printf '  %-58s FAILED (%s)\n' "$role" "$(tr -d '\n' </tmp/az-stage4-err | head -c 160)"
+      rm -f /tmp/az-stage4-err
+      exit 1
+    fi
+  fi
+  rm -f /tmp/az-stage4-err
+
+  log "Done. Sign in to https://studio.discovery.microsoft.com/ and select workspace '$ws_name'."
+}
+stage_4() { time_step "Stage 4" _stage_4 "$@"; }
+
 cmd="${1:-}"
 case "$cmd" in
   build)                       run_build ;;
@@ -491,7 +727,8 @@ case "$cmd" in
   1|network)                   stage_1 ;;
   2|supercomputer|sc)          stage_2 ;;
   3|workspace|ws)              stage_3 ;;
-  all)                         run_prereqs; stage_1; stage_2; stage_3 ;;
+  4|foundry-role)              stage_4 "${2:-}" ;;
+  all)                         run_prereqs; stage_1; stage_2; stage_3; stage_4 ;;
   outputs)                     az resource list --resource-group "$RG" -o table ;;
   teardown)                    az group delete --name "$RG" --yes --no-wait ;;
   *)
