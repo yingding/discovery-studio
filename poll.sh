@@ -74,13 +74,15 @@ discovery_status_lines() {
 
 # Print a summary of each Discovery-managed sibling RG: `<rg-prefix>: N (counts)`.
 # Discovers them via `properties.managedResourceGroup` on Discovery parents in $RG.
+# Format:
+#   <mrg>=N ✓ all Succeeded          (when everything is done)
+#   <mrg>=N (3 Running, 1 Updating, 42 Succeeded)  (in-progress first, then Succeeded)
 managed_status_line() {
   local mrgs mrg out=""
   mrgs="$(az resource list -g "$RG" \
     --query "[?type=='Microsoft.Discovery/supercomputers' || type=='Microsoft.Discovery/workspaces'].name" \
     -o tsv 2>/dev/null)"
   for parent_name in $mrgs; do
-    # Get the parent's managedResourceGroup
     local parent_type
     parent_type="$(az resource list -g "$RG" --name "$parent_name" --query "[0].type" -o tsv 2>/dev/null)"
     mrg="$(az resource show -g "$RG" --resource-type "$parent_type" --name "$parent_name" \
@@ -88,18 +90,42 @@ managed_status_line() {
     [[ -z "$mrg" ]] && continue
     local summary
     summary="$(az resource list -g "$mrg" --query '[].provisioningState' -o tsv 2>/dev/null | \
-      awk 'BEGIN{n=0} {n++; counts[$1]++} END {
-        if (n==0) {print "0"; exit}
-        out = n " ("
-        first = 1
-        for (s in counts) {
-          if (!first) out = out ", "
-          out = out counts[s] " " s
-          first = 0
-        }
-        out = out ")"
-        print out
-      }')"
+      awk 'BEGIN{n=0}
+        {n++; counts[$1]++}
+        END {
+          if (n==0) {print "0"; exit}
+          # split states into in-progress (non-terminal) and terminal buckets
+          # so the "what is still open" count leads the breakdown
+          order_inprogress = "Running Accepted Creating Updating Deleting Migrating"
+          order_terminal   = "Failed Canceled Succeeded"
+          parts = ""
+          # in-progress first
+          split(order_inprogress, ip, " ")
+          for (i=1; i<=length(ip); i++) {
+            s = ip[i]
+            if (counts[s]) { parts = parts (parts ? ", " : "") counts[s] " " s; delete counts[s] }
+          }
+          # then terminal states (Failed/Canceled before Succeeded)
+          split(order_terminal, tm, " ")
+          for (i=1; i<=length(tm); i++) {
+            s = tm[i]
+            if (counts[s]) { parts = parts (parts ? ", " : "") counts[s] " " s; delete counts[s] }
+          }
+          # any leftover unknown states (filter empty entries that BSD awk may
+          # have implicitly created from earlier `if (counts[s])` reads)
+          for (s in counts) {
+            if (counts[s] != "" && counts[s] > 0) {
+              parts = parts (parts ? ", " : "") counts[s] " " s
+            }
+          }
+
+          # collapse to "all Succeeded" when nothing else
+          if (parts ~ /^[0-9]+ Succeeded$/) {
+            print n " ✓ all Succeeded"
+          } else {
+            print n " (" parts ")"
+          }
+        }')"
     out="${out} | ${mrg}=${summary}"
   done
   printf '%s' "$out"
