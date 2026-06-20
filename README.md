@@ -17,8 +17,12 @@ export RG=rg-discovery-yw-uno
 export LOCATION=swedencentral
 
 ./deploy.sh prereqs            # one-time per sub (~1 min) — registers RPs, creates RG, assigns NSP/Reader roles
-./deploy.sh all                # stages 1 + 2 + 3 (~40-70 min)
+./deploy.sh 1                  # Stage 1: networking            (~1 min)
+./deploy.sh 2                  # Stage 2: SC + node pool        (~20-35 min)
+./deploy.sh 3                  # Stage 3: workspace + project   (~15-30 min)
 ```
+
+Or run all stages in one shot with `./deploy.sh all`.
 
 When idle: `./deploy.sh pause` (drops idle cost to ~$0). Resume with `./deploy.sh 2`.
 
