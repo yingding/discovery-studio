@@ -753,6 +753,14 @@ run_pause() { time_step "Pause" _run_pause; }
 # the orphan `legionservicelink` SAL on agentSubnet also disappears with
 # the VNet (VNet delete bypasses SAL allowDelete:false).
 #
+# We also force-delete the Discovery-owned managed RGs directly
+# (mrg-dscmp-<sc>-* and mrg-dwsp-<ws>-*) — Azure's auto-cascade from
+# the parent Discovery resources doesn't always push these to completion
+# (AKS / Key Vault soft-delete / NSP edge cases), and the parent RG
+# delete waits for them indefinitely. These MRGs carry no deny-
+# assignment on standard subs, so a direct `az group delete --no-wait`
+# goes through and unblocks the parent.
+#
 # Env:
 #   TEARDOWN_WAIT=1 (default)  - wait for RG to fully disappear before returning
 #   TEARDOWN_WAIT=0            - kick off async and return immediately
@@ -792,6 +800,24 @@ _run_teardown() {
     log "  - deleting supercomputer $sc_name ..."
     az resource delete -g "$RG" --resource-type Microsoft.Discovery/supercomputers --name "$sc_name" 2>&1 | tail -3 || true
   fi
+
+  # 3b. Force-delete the Discovery-managed RGs directly.
+  # The parent RG delete often gets stuck on these because:
+  #   - mrg-dscmp-<sc>-* holds the SC's AKS cluster, Key Vault, NSP, Log
+  #     Analytics, DCR — Azure's auto-cascade from a Discovery resource
+  #     delete sometimes never makes progress past them.
+  #   - mrg-dwsp-<ws>-* holds the Foundry account, KV, search, etc.,
+  #     which similarly can outlive their parent workspace.
+  # These RGs have NO deny-assignment on this MCAPS sub (verified), so
+  # an explicit `az group delete --no-wait` on each goes through and
+  # unblocks the parent RG.
+  local mrg
+  for mrg in $(az group list \
+      --query "[?starts_with(name, 'mrg-dscmp-${sc_name}-') || starts_with(name, 'mrg-dwsp-${ws_name}-')].name" \
+      -o tsv 2>/dev/null); do
+    log "  - deleting Discovery-managed RG $mrg (async)..."
+    az group delete --name "$mrg" --yes --no-wait 2>&1 | tail -2 || true
+  done
 
   # 4. Final RG delete (catches anything left + any orphan SAL via cascading VNet drop).
   log "  - deleting resource group $RG ..."
