@@ -11,8 +11,9 @@
 #                                            # subscription scope (auto-run by `prereqs`).
 #                                            # Required by Microsoft.Discovery/*@2026-06-01 GA API
 #                                            # which auto-creates an NSP and enrolls the sub.
-#                                            # Docs: https://learn.microsoft.com/en-gb/azure/microsoft-discovery/how-to-configure-network-security?tabs=azure-cli#assign-the-nsp-perimeter-joiner-role
-#   ./deploy.sh 1 | network                  # Stage 1: VNet + subnets
+#                                            # Docs: https://learn.microsoft.com/en-gb/azure/microsoft-discovery/how-to-configure-network-security?tabs=azure-cli#assign-the-nsp-perimeter-joiner-role#   ./deploy.sh pause                       # delete the supercomputer (and its managed mrg-dscmp-* RG)
+#                                            # to stop the always-on system-pool cost. VNet/UAMI/
+#                                            # storage/RBAC are kept. Resume with `./deploy.sh 2`.#   ./deploy.sh 1 | network                  # Stage 1: VNet + subnets
 #   ./deploy.sh 2 | supercomputer            # Stage 2: UAMI + Storage + RBAC + SC + NodePool
 #   ./deploy.sh 3 | workspace                # Stage 3: Workspace + ChatModel + Project + Container
 #   ./deploy.sh all                          # prereqs + 1 + 2 + 3
@@ -331,12 +332,37 @@ stage_3() {
   run_stage 3 03-workspace.bicep "${STAGE3_PARAMS[@]}" storageAccountName="$sa"
 }
 
+_run_pause() {
+  local sc_name="sc-${PREFIX}"
+  log "Pausing $sc_name in $RG (VNet/UAMI/storage/RBAC are kept)."
+
+  if [[ "$(az resource show -g "$RG" --resource-type Microsoft.Discovery/supercomputers --name "$sc_name" --query name -o tsv 2>/dev/null || true)" == "$sc_name" ]]; then
+    log "Deleting supercomputer $sc_name (cascades to np1; takes 5-15 min)..."
+    az resource delete -g "$RG" --resource-type Microsoft.Discovery/supercomputers --name "$sc_name"
+  else
+    log "Supercomputer $sc_name not found, skipping."
+  fi
+
+  # Discovery's managed infra RG is mrg-dscmp-sc-<prefix>-<random>. Usually
+  # cleaned up automatically when the SC is deleted, but stale ones can
+  # linger after a failed delete — sweep them too.
+  local mrg
+  for mrg in $(az group list --query "[?starts_with(name, 'mrg-dscmp-${sc_name}-')].name" -o tsv 2>/dev/null); do
+    log "Deleting orphaned managed RG $mrg (async)..."
+    az group delete --name "$mrg" --yes --no-wait
+  done
+
+  log "Pause done. Resume with: ./deploy.sh 2"
+}
+run_pause() { time_step "Pause" _run_pause; }
+
 cmd="${1:-}"
 case "$cmd" in
   build)                       run_build ;;
   prereqs)                     run_prereqs ;;
   roles)                       run_roles "${2:-}" ;;
   nsp-role)                    ensure_nsp_joiner_role ;;
+  pause)                       run_pause ;;
   1|network)                   stage_1 ;;
   2|supercomputer|sc)          stage_2 ;;
   3|workspace|ws)              stage_3 ;;
