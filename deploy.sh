@@ -93,6 +93,31 @@ NODE_POOL_PRIORITY="${NODE_POOL_PRIORITY:-Regular}"        # Regular | Spot
 # Stage 3 — Workspace / Chat model
 CHAT_MODEL_NAME="${CHAT_MODEL_NAME:-gpt-5-mini}"            # set to "" to skip chat model
 
+# Stage 4 — End-user role assignments
+# ----------------------------------------------------------------------
+# Two assignments per user, each at a different scope (least-privilege).
+# Override either role name via env var if you want a different persona.
+#
+# 1. Foundry role on the workspace's managed RG (mrg-dwsp-<ws>-*).
+#    Required to open the workspace in Discovery Studio at all.
+#    Discovery Studio looks for this specific role; there's no
+#    documented alternative.
+STAGE4_FOUNDRY_ROLE="${STAGE4_FOUNDRY_ROLE:-Foundry User}"
+#
+# 2. Microsoft Discovery built-in role on the workspace resource.
+#    Default: Contributor (Scientist persona) — needed for "shared
+#    sessions", investigations, conversations, models, tools, workflows.
+#    See https://learn.microsoft.com/azure/microsoft-discovery/concept-role-assignments
+#    Built-in alternatives (uncomment to switch):
+#STAGE4_DISC_ROLE="${STAGE4_DISC_ROLE:-Microsoft Discovery Platform Administrator (Preview)}"  # full platform admin — read/write/delete all Discovery resources + assign roles
+STAGE4_DISC_ROLE="${STAGE4_DISC_ROLE:-Microsoft Discovery Platform Contributor (Preview)}"     # Scientist persona — investigations + shared sessions (default)
+#STAGE4_DISC_ROLE="${STAGE4_DISC_ROLE:-Microsoft Discovery Platform Reader (Preview)}"          # read-only / observer persona
+#
+# Scope for the Discovery role: 'workspace' (default, least-privilege,
+# applies only to ws-<PREFIX>) or 'rg' (broadens to every Discovery
+# resource in $RG — matches MSFT Scientist persona recommendation).
+STAGE4_DISC_SCOPE="${STAGE4_DISC_SCOPE:-workspace}"
+
 # MCAPS Policy exemption
 # Auto-detected: enabled when the subscription name matches the
 # Microsoft-tenant MCAPS pattern (e.g. "ME-MngEnvMCAP..."); skipped
@@ -1033,7 +1058,23 @@ run_cleanup_ws() { time_step "Cleanup-ws" _run_cleanup_ws; }
 _stage_4() {
   local target="${1:-}"
   local ws_name="ws-${PREFIX}"
-  local role="Foundry User"
+  # Two role assignments are needed for a Discovery Studio end-user:
+  #   - $STAGE4_FOUNDRY_ROLE on the workspace's managed RG (mrg-dwsp-*)
+  #     => required to open the workspace at all (Foundry account is in MRG).
+  #   - $STAGE4_DISC_ROLE on the workspace resource itself (or RG, see
+  #     STAGE4_DISC_SCOPE)
+  #     => required for "shared sessions", investigations, conversations,
+  #        models, tools, workflows. Without it the project opens but the
+  #        Shared Sessions pane shows "Access denied. Ensure you have the
+  #        correct role assigned on this workspace resource ..." (and many
+  #        other read/data actions also fail).
+  #     Docs: https://learn.microsoft.com/azure/microsoft-discovery/concept-role-assignments#built-in-microsoft-discovery-roles
+  #
+  # Both role names + the disc-role scope are env-var overridable — see
+  # the CONFIG section at the top of this file for built-in alternatives
+  # (Administrator / Contributor / Reader) and scope choice (workspace vs rg).
+  local foundry_role="$STAGE4_FOUNDRY_ROLE"
+  local disc_role="$STAGE4_DISC_ROLE"
 
   local principal_id principal_type display
   if [[ -z "$target" ]]; then
@@ -1047,39 +1088,61 @@ _stage_4() {
   fi
 
   log "Stage 4: resolving workspace $ws_name managed RG..."
-  local mrg
+  local mrg ws_id
   mrg="$(az resource show -g "$RG" \
     --resource-type Microsoft.Discovery/workspaces \
     --name "$ws_name" \
     --query properties.managedResourceGroup -o tsv 2>/dev/null || true)"
-  if [[ -z "$mrg" ]]; then
+  ws_id="$(az resource show -g "$RG" \
+    --resource-type Microsoft.Discovery/workspaces \
+    --name "$ws_name" \
+    --query id -o tsv 2>/dev/null || true)"
+  if [[ -z "$mrg" || -z "$ws_id" ]]; then
     echo "ERROR: workspace $ws_name not found in $RG (or has no managedResourceGroup). Run ./deploy.sh 3 first." >&2
     exit 1
   fi
-  local scope="/subscriptions/${SUBSCRIPTION}/resourceGroups/${mrg}"
-  log "Workspace managed RG: $mrg"
-  log "Assigning '$role' to $display ($principal_id) on $scope"
+  local mrg_scope="/subscriptions/${SUBSCRIPTION}/resourceGroups/${mrg}"
 
-  if az role assignment list --assignee "$principal_id" --role "$role" --scope "$scope" --query "[0].id" -o tsv 2>/dev/null | grep -q .; then
-    printf '  %-58s already assigned\n' "$role"
-  else
-    if az role assignment create \
-        --assignee-object-id "$principal_id" \
-        --assignee-principal-type "$principal_type" \
-        --role "$role" \
-        --scope "$scope" -o none 2>/tmp/az-stage4-err; then
-      printf '  %-58s assigned\n' "$role"
-    else
-      printf '  %-58s FAILED (%s)\n' "$role" "$(tr -d '\n' </tmp/az-stage4-err | head -c 160)"
-      rm -f /tmp/az-stage4-err
-      exit 1
-    fi
+  # Allow broadening the Discovery-side role to RG scope via env var.
+  local disc_scope="$ws_id"
+  if [[ "${STAGE4_DISC_SCOPE:-workspace}" == "rg" ]]; then
+    disc_scope="/subscriptions/${SUBSCRIPTION}/resourceGroups/${RG}"
   fi
-  rm -f /tmp/az-stage4-err
+
+  log "Workspace managed RG: $mrg"
+  log "Assignments for $display ($principal_id):"
+  log "  - '$foundry_role' on $mrg_scope"
+  log "  - '$disc_role' on $disc_scope"
+
+  _assign_role_once "$principal_id" "$principal_type" "$foundry_role" "$mrg_scope"  || exit 1
+  _assign_role_once "$principal_id" "$principal_type" "$disc_role"    "$disc_scope" || exit 1
 
   log "Done. Sign in to https://studio.discovery.microsoft.com/ and select workspace '$ws_name'."
 }
 stage_4() { time_step "Stage 4" _stage_4 "$@"; }
+
+# Idempotent role assignment helper used by stage_4 (and friends).
+# Prints "  <role>  already assigned" / "  <role>  assigned" / "  <role>  FAILED (..)".
+# Returns 0 on success or already-assigned, 1 on failure.
+_assign_role_once() {
+  local principal_id="$1" principal_type="$2" role="$3" scope="$4"
+  if az role assignment list --assignee "$principal_id" --role "$role" --scope "$scope" --query "[0].id" -o tsv 2>/dev/null | grep -q .; then
+    printf '  %-58s already assigned\n' "$role"
+    return 0
+  fi
+  if az role assignment create \
+      --assignee-object-id "$principal_id" \
+      --assignee-principal-type "$principal_type" \
+      --role "$role" \
+      --scope "$scope" -o none 2>/tmp/az-stage4-err; then
+    printf '  %-58s assigned\n' "$role"
+    rm -f /tmp/az-stage4-err
+    return 0
+  fi
+  printf '  %-58s FAILED (%s)\n' "$role" "$(tr -d '\n' </tmp/az-stage4-err | head -c 200)"
+  rm -f /tmp/az-stage4-err
+  return 1
+}
 
 # Quick read-only status across all 4 stages + orphan flags. No mutations.
 # Helps you remember where a project left off after coming back to it cold.
@@ -1119,21 +1182,33 @@ _run_status() {
   stc_state="$(az resource list -g "$RG" --resource-type Microsoft.Discovery/storageContainers --query "[0].provisioningState" -o tsv 2>/dev/null)"; [[ -z "$stc_state" ]] && stc_state=Missing
   printf '  \033[1mStage 3 (ws)\033[0m        ws=%s chat=%s proj=%s stc=%s\n' "$ws_state" "$cm_state" "$prj_state" "$stc_state"
 
-  # --- Stage 4: signed-in user's Foundry User assignment on the workspace MRG ---
+  # --- Stage 4: signed-in user's role assignments for using the workspace ---
   if [[ "$ws_state" == "Succeeded" ]]; then
-    local mrg signed_oid has_role
+    local mrg ws_id signed_oid has_foundry has_disc
     mrg="$(az resource show -g "$RG" --resource-type Microsoft.Discovery/workspaces --name "$ws_name" --query properties.managedResourceGroup -o tsv 2>/dev/null || true)"
+    ws_id="$(az resource show -g "$RG" --resource-type Microsoft.Discovery/workspaces --name "$ws_name" --query id -o tsv 2>/dev/null || true)"
     signed_oid="$(az ad signed-in-user show --query id -o tsv 2>/dev/null || true)"
-    if [[ -n "$mrg" && -n "$signed_oid" ]]; then
-      has_role="$(az role assignment list --assignee "$signed_oid" --scope "/subscriptions/${sub}/resourceGroups/${mrg}" --role 'Foundry User' --query "[0].id" -o tsv 2>/dev/null || true)"
-      if [[ -n "$has_role" ]]; then
-        printf '  \033[1mStage 4 (role)\033[0m      Foundry User assigned on %s (signed-in user)\n' "$mrg"
+    if [[ -n "$mrg" && -n "$ws_id" && -n "$signed_oid" ]]; then
+      has_foundry="$(az role assignment list --assignee "$signed_oid" --scope "/subscriptions/${sub}/resourceGroups/${mrg}" --role 'Foundry User' --query "[0].id" -o tsv 2>/dev/null || true)"
+      has_disc="$(az role assignment list --assignee "$signed_oid" --scope "$ws_id" --role 'Microsoft Discovery Platform Contributor (Preview)' --query "[0].id" -o tsv 2>/dev/null || true)"
+      # Also accept the role at RG scope, in case STAGE4_DISC_SCOPE=rg was used.
+      if [[ -z "$has_disc" ]]; then
+        has_disc="$(az role assignment list --assignee "$signed_oid" --scope "/subscriptions/${sub}/resourceGroups/${RG}" --role 'Microsoft Discovery Platform Contributor (Preview)' --query "[0].id" -o tsv 2>/dev/null || true)"
+      fi
+      printf '  \033[1mStage 4 (roles)\033[0m     signed-in user:\n'
+      if [[ -n "$has_foundry" ]]; then
+        printf '    Foundry User                                    ✓ on %s\n' "$mrg"
       else
-        printf '  \033[1mStage 4 (role)\033[0m      \033[1;33mNOT assigned\033[0m on %s — run: ./deploy.sh 4\n' "$mrg"
+        printf '    \033[1;33mFoundry User                                    NOT assigned\033[0m — run ./deploy.sh 4\n'
+      fi
+      if [[ -n "$has_disc" ]]; then
+        printf '    Microsoft Discovery Platform Contributor (Preview)  ✓ on ws/rg\n'
+      else
+        printf '    \033[1;33mMicrosoft Discovery Platform Contributor (Preview)  NOT assigned\033[0m — run ./deploy.sh 4\n'
       fi
     fi
   else
-    printf '  \033[1mStage 4 (role)\033[0m      (skipped — needs ws Succeeded)\n'
+    printf '  \033[1mStage 4 (roles)\033[0m     (skipped — needs ws Succeeded)\n'
   fi
 
   # --- Orphan flags ---

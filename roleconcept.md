@@ -10,6 +10,7 @@ Every Azure RBAC role assignment this deployment creates, who it's assigned to, 
   - [Resource-group scope — UAMI `uami-<PREFIX>`](#resource-group-scope--uami-uami-prefix)
   - [Resource-group scope — your user (Platform Admin persona)](#resource-group-scope--your-user-platform-admin-persona)
   - [Workspace managed-RG scope — your user (Foundry User)](#workspace-managed-rg-scope--your-user-foundry-user)
+  - [Workspace resource scope — your user (Discovery Platform Contributor)](#workspace-resource-scope--your-user-discovery-platform-contributor)
 - [Permission flow diagrams](#permission-flow-diagrams)
 - [Common error → role mapping](#common-error--role-mapping)
 - [What this repo does *not* do](#what-this-repo-does-not-do)
@@ -84,6 +85,25 @@ az resource list --resource-type Microsoft.Discovery/workspaces \
 
 Then in the Azure portal: that RG → Access Control (IAM) → Add → Foundry User → your user.
 
+### Workspace resource scope — your user (Discovery Platform Contributor)
+
+| Role | Type | Scope | Why it's needed |
+|---|---|---|---|
+| **Microsoft Discovery Platform Contributor (Preview)** | Built-in (Discovery) | `Microsoft.Discovery/workspaces/ws-<PREFIX>` (or the parent RG — see `STAGE4_DISC_SCOPE`) | The Scientist persona role from the [Microsoft Discovery role catalog](https://learn.microsoft.com/azure/microsoft-discovery/concept-role-assignments#built-in-microsoft-discovery-roles). Required for **shared sessions**, investigations, conversations, models, tools, and workflows inside Discovery Studio. Without it the project opens but the Shared Sessions pane shows *"Access denied. Ensure you have the correct role assigned on this workspace resource"*. **Also automated by `./deploy.sh 4`** — it grants both Foundry User (on MRG) and this role (on the workspace) in one command. |
+
+Why two roles for one Stage 4? They live in two different Azure resource graphs:
+
+- **Foundry User on `mrg-dwsp-*`** — gates the underlying Azure AI Foundry account (chat model, agent thread storage, search index). Without it the Studio can't even fetch workspace metadata.
+- **Discovery Platform Contributor on `ws-<PREFIX>`** — gates the Discovery RP data-plane endpoints that back investigations and shared sessions. Without it the Studio loads the workspace shell but every Discovery data call fails 403.
+
+**Built-in alternatives** (override via `STAGE4_DISC_ROLE=` env var, see the CONFIG block in `deploy.sh`):
+
+| Role | Use case |
+|---|---|
+| `Microsoft Discovery Platform Administrator (Preview)` | Full admin — read/write/delete all Discovery resources + ABAC-restricted role assignments |
+| `Microsoft Discovery Platform Contributor (Preview)` *(default)* | Scientist persona — investigations + shared sessions + data actions |
+| `Microsoft Discovery Platform Reader (Preview)` | Observer/reviewer — read-only access to conversations and shared research data |
+
 ## Permission flow diagrams
 
 ### Stage 2 create path (where things break without RBAC)
@@ -119,6 +139,7 @@ sequenceDiagram
 | `unauthorized: authentication required` pulling image | AcrPull (on UAMI) | Re-run `./deploy.sh 2` |
 | Cannot create / list Discovery resources in Azure portal | Microsoft Discovery Platform Administrator on RG | `./deploy.sh roles` |
 | Can see workspace but no chat / project access in Discovery Studio | Foundry User on workspace's managed RG | `./deploy.sh 4` (or assign manually in portal) |
+| Project opens but Shared Sessions pane says `Access denied. Ensure you have the correct role assigned on this workspace resource` | Microsoft Discovery Platform Contributor (Preview) on the workspace resource | `./deploy.sh 4` (or assign manually in portal) |
 
 ## What this repo does *not* do
 
@@ -126,6 +147,7 @@ sequenceDiagram
 - **Network Security Perimeter scope changes** — only joins your sub to the NSP Discovery creates; doesn't add other resources.
 - **Conditional Access / Entra App role consent** — assumed already in place for the tenant.
 - **Foundry User on the workspace managed RG** — automated by `./deploy.sh 4` (one-shot post-Stage-3 helper); also assignable manually in portal.
+- **Microsoft Discovery Platform Contributor (Preview) on the workspace resource** — also automated by `./deploy.sh 4`, in the same call. Override the role name with `STAGE4_DISC_ROLE=` (alternatives: Administrator / Reader) or broaden the scope from `workspace` to the parent RG with `STAGE4_DISC_SCOPE=rg`.
 
 ## References
 
