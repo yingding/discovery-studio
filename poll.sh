@@ -146,23 +146,62 @@ while :; do
   fi
   dep_state="${dep_state:-Unknown}"
 
-  # Line 1: deployment + dynamic Discovery resources (or VNet for stage 1)
-  if [[ "$STAGE" == "1" ]]; then
-    vn_state="$(az resource show -g "$RG" \
-      --resource-type Microsoft.Network/virtualNetworks \
-      --name "vnet-${PREFIX}" \
-      --query properties.provisioningState -o tsv 2>/dev/null || echo Missing)"
-    resources=" | vnet=$(state_color "$vn_state")"
-  else
-    resources="$(discovery_status_line)"
-  fi
+  # Line 1: deployment + short stage-specific labels
+  resources=""
+  case "$STAGE" in
+    1)
+      vn_state="$(az resource show -g "$RG" \
+        --resource-type Microsoft.Network/virtualNetworks \
+        --name "vnet-${PREFIX}" \
+        --query properties.provisioningState -o tsv 2>/dev/null || echo Missing)"
+      resources=" | vnet=$(state_color "$vn_state")"
+      ;;
+    2)
+      sc_state="$(az resource show -g "$RG" \
+        --resource-type Microsoft.Discovery/supercomputers \
+        --name "sc-${PREFIX}" \
+        --query properties.provisioningState -o tsv 2>/dev/null || echo Missing)"
+      np_state="$(az resource show \
+        --ids "/subscriptions/${SUB}/resourceGroups/${RG}/providers/Microsoft.Discovery/supercomputers/sc-${PREFIX}/nodePools/np1" \
+        --query properties.provisioningState -o tsv 2>/dev/null || echo Missing)"
+      resources=" | sc=$(state_color "$sc_state") | np1=$(state_color "$np_state")"
+      ;;
+    3)
+      ws_state="$(az resource show -g "$RG" \
+        --resource-type Microsoft.Discovery/workspaces \
+        --name "ws-${PREFIX}" \
+        --query properties.provisioningState -o tsv 2>/dev/null || echo Missing)"
+      cm_state="$(az resource list -g "$RG" \
+        --resource-type Microsoft.Discovery/workspaces/chatModelDeployments \
+        --query "[0].provisioningState" -o tsv 2>/dev/null)"
+      [[ -z "$cm_state" ]] && cm_state=Missing
+      prj_state="$(az resource list -g "$RG" \
+        --resource-type Microsoft.Discovery/workspaces/projects \
+        --query "[0].provisioningState" -o tsv 2>/dev/null)"
+      [[ -z "$prj_state" ]] && prj_state=Missing
+      stc_state="$(az resource list -g "$RG" \
+        --resource-type Microsoft.Discovery/storageContainers \
+        --query "[0].provisioningState" -o tsv 2>/dev/null)"
+      [[ -z "$stc_state" ]] && stc_state=Missing
+      resources=" | ws=$(state_color "$ws_state") | chat=$(state_color "$cm_state") | proj=$(state_color "$prj_state") | stc=$(state_color "$stc_state")"
+      ;;
+  esac
 
   printf '[%s | +%3dm] deployment=%-30s %s%s\n' \
     "$now" "$elapsed" "$dep_name" \
     "$(state_color "$dep_state")" \
     "$resources"
 
-  # Line 2: managed RG summary (only when there's something to show)
+  # Line 2: dynamic verbose list of every Microsoft.Discovery/* resource in $RG
+  # (covers everything, including types not in the short summary on line 1).
+  if [[ "$STAGE" != "1" ]]; then
+    verbose_line="$(discovery_status_line)"
+    if [[ -n "$verbose_line" ]]; then
+      printf '                       discovery%s\n' "$verbose_line"
+    fi
+  fi
+
+  # Line 3: managed RG summary (only when there's something to show)
   if [[ "$STAGE" != "1" ]]; then
     mrg_line="$(managed_status_line)"
     if [[ -n "$mrg_line" ]]; then
