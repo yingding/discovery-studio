@@ -3,22 +3,32 @@
 #
 # Usage:
 #   ./deploy.sh build                        # local Bicep compile/lint (no Azure call)
-#   ./deploy.sh prereqs                      # register providers + create RG
+#   ./deploy.sh prereqs                      # register providers + create RG + assign NSP/Reader
+#                                            # roles on the Discovery first-party SP. Also runs
+#                                            # ensure_mcaps_exemption when MCAPS_EXEMPTION=1.
 #   ./deploy.sh roles [user-upn-or-objectid] # assign Discovery Platform Admin persona roles on RG
 #                                            # (defaults to the signed-in user)
 #   ./deploy.sh nsp-role                     # ensure the Discovery first-party SP has the
-#                                            # "Discovery NSP Perimeter Joiner" custom role at
-#                                            # subscription scope (auto-run by `prereqs`).
+#                                            # "Discovery NSP Perimeter Joiner" custom role + Reader
+#                                            # at subscription scope (auto-run by `prereqs`).
 #                                            # Required by Microsoft.Discovery/*@2026-06-01 GA API
 #                                            # which auto-creates an NSP and enrolls the sub.
-#                                            # Docs: https://learn.microsoft.com/en-gb/azure/microsoft-discovery/how-to-configure-network-security?tabs=azure-cli#assign-the-nsp-perimeter-joiner-role#   ./deploy.sh pause                       # delete the supercomputer (and its managed mrg-dscmp-* RG)
-#                                            # to stop the always-on system-pool cost. VNet/UAMI/
-#                                            # storage/RBAC are kept. Resume with `./deploy.sh 2`.
-#   ./deploy.sh mcaps-exempt                 # opt-in: create an Azure Policy exemption (Waiver) on this
-#                                            # subscription so MCAPS deny policies don't block the
-#                                            # GPU VMSS that the Discovery node pool creates.
+#                                            # Docs: https://learn.microsoft.com/en-gb/azure/microsoft-discovery/how-to-configure-network-security?tabs=azure-cli#assign-the-nsp-perimeter-joiner-role
+#   ./deploy.sh mcaps-exempt                 # opt-in: ensure Azure Policy exemptions exist on this
+#                                            # subscription for each assignment listed in
+#                                            # MCAPS_ASSIGNMENT_NAMES (default: MCAPSGovDeployPolicies
+#                                            # and MCAPSGovDenyPolicies). The Deny one is what
+#                                            # blocks the GPU VMSS the Discovery node pool creates.
 #                                            # Only needed on MCAPS-governed subscriptions (e.g.
 #                                            # MngEnvMCAP*). Auto-run by `prereqs` when MCAPS_EXEMPTION=1.
+#                                            # Skips create when an exemption (self- or admin-created,
+#                                            # any scope) already targets the assignment.
+#                                            # Category defaults to Mitigated, expires 2030-01-01.
+#                                            # Override with MCAPS_EXEMPTION_CATEGORY=Waiver,
+#                                            # MCAPS_EXEMPTION_EXPIRES_ON=<ISO8601>, etc.
+#   ./deploy.sh pause                        # delete the supercomputer (and its managed mrg-dscmp-* RG)
+#                                            # to stop the always-on system-pool cost. VNet/UAMI/
+#                                            # storage/RBAC are kept. Resume with `./deploy.sh 2`.
 #   ./deploy.sh 1 | network                  # Stage 1: VNet + subnets
 #   ./deploy.sh 2 | supercomputer            # Stage 2: UAMI + Storage + RBAC + SC + NodePool
 #   ./deploy.sh 3 | workspace                # Stage 3: Workspace + ChatModel + Project + Container
@@ -28,6 +38,7 @@
 #
 # Configure RG/location via env vars:
 #   RG=rg-discovery-yw-uno LOCATION=swedencentral ./deploy.sh 1
+#   MCAPS_EXEMPTION=1 ./deploy.sh prereqs                          # opt-in MCAPS exemption check
 
 set -euo pipefail
 
