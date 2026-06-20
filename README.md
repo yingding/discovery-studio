@@ -8,63 +8,67 @@ Three-stage Bicep deployment based on the official [Azure quickstart](https://gi
 | 2 | [02-supercomputer.bicep](02-supercomputer.bicep) | UAMI · Storage · RBAC · Supercomputer · Node Pool |
 | 3 | [03-workspace.bicep](03-workspace.bicep) | Workspace · Chat Model · Project · Discovery Storage Container |
 
-See [architecture.md](architecture.md) for diagrams and per-resource details.
+For deep dives see [architecture.md](architecture.md) (resource graph, RBAC, network model) and [quickstart.md](quickstart.md) (full helper-script reference).
+
+## Minimal quickstart
+
+```bash
+export RG=rg-discovery-yw-uno
+export LOCATION=swedencentral
+
+./deploy.sh prereqs            # one-time per sub (~1 min) — registers RPs, creates RG, assigns NSP/Reader roles
+./deploy.sh all                # stages 1 + 2 + 3 (~40-70 min)
+```
+
+When idle: `./deploy.sh pause` (drops idle cost to ~$0). Resume with `./deploy.sh 2`.
+
+See [quickstart.md](quickstart.md) for the full subcommand reference, customisation knobs, and troubleshooting.
 
 ## Prerequisites
 
 1. **Platform/IT admin** persona roles. Quick way: run [`Set-DiscoveryRoleAssignments.ps1`](https://learn.microsoft.com/en-gb/azure/microsoft-discovery/how-to-assign-persona-roles).
-2. **Discovery NSP Perimeter Joiner** custom role created and assigned to the Discovery first-party service principal. ✅ **`./deploy.sh prereqs` handles this automatically** (idempotent). Background: the GA API `Microsoft.Discovery/*@2026-06-01` auto-creates a Network Security Perimeter and tries to enroll your subscription into it, which requires `Microsoft.Network/networkSecurityPerimeters/joinPerimeterRule/action` at subscription scope on the Discovery SP. The [official Azure quickstart](https://github.com/Azure/azure-quickstart-templates/tree/master/quickstarts/microsoft.discovery/discovery-infra-deployment) doesn't mention it because it still uses the preview API `@2026-02-01-preview`. See [Microsoft Discovery NSP docs](https://learn.microsoft.com/en-gb/azure/microsoft-discovery/how-to-configure-network-security?tabs=azure-cli#assign-the-nsp-perimeter-joiner-role).
-   - Requires **Owner** or **User Access Administrator** on the subscription to create the custom role + assignment (one-time per subscription).
-   - Run standalone with `./deploy.sh nsp-role`.
+2. **Discovery NSP Perimeter Joiner** custom role + Reader role on the Discovery first-party SP. ✅ **`./deploy.sh prereqs` handles both automatically** (idempotent). Requires **Owner** or **User Access Administrator** on the subscription. Background and reference: [quickstart.md → setup](quickstart.md#setup) and [Microsoft Discovery NSP docs](https://learn.microsoft.com/en-gb/azure/microsoft-discovery/how-to-configure-network-security?tabs=azure-cli#assign-the-nsp-perimeter-joiner-role).
 3. Quota in target region (`Microsoft.Compute` for the node pool SKU you pick).
-4. Required Azure resource providers registered on your subscription. `./deploy.sh prereqs` registers the core 6 needed by this template; the full list (≈24 providers) is documented in [Discovery quickstart prerequisites](https://learn.microsoft.com/en-us/azure/microsoft-discovery/quickstart-infrastructure-portal#prerequisites).
+4. Required Azure resource providers — `./deploy.sh prereqs` registers the core 6; full list in [Discovery quickstart prerequisites](https://learn.microsoft.com/en-us/azure/microsoft-discovery/quickstart-infrastructure-portal#prerequisites).
 
-> At the time of writing, uses ARM API `Microsoft.Discovery/*@2026-06-01`.
+> ARM API: `Microsoft.Discovery/*@2026-06-01`.
 
-## Step-by-step deployment
+## Helper scripts
 
-```bash
-# Override defaults if needed:
-export RG=rg-discovery-yw-uno
-export LOCATION=swedencentral
+| Script | Purpose |
+|---|---|
+| [deploy.sh](deploy.sh) | All lifecycle commands: `prereqs`, `1`/`2`/`3`/`all`, `pause`, `teardown`, `roles`, `outputs`, `build` |
+| [poll.sh](poll.sh) | Color-coded real-time watcher for the latest deployment + SC + np1 |
+| [cost.sh](cost.sh) | Live monthly cost estimate from the Azure Retail Prices API |
 
-./deploy.sh prereqs            # register providers + create RG + assign NSP/Reader roles (~1 min)
-./deploy.sh 1                  # Stage 1: networking            (~1 min)
-./deploy.sh 2                  # Stage 2: SC + node pool        (~20-35 min: SC ~8-15 min, np1 ~10-25 min)
-./deploy.sh 3                  # Stage 3: workspace + project   (~15-30 min)
-```
-
-Every stage prints `START` / `END` / elapsed-minute lines so you always know how long each step took.
-
-To watch a long-running stage in another terminal:
+Every `deploy.sh` stage prints `START` / `END` / elapsed-minute banners. Watch a long stage in a second terminal:
 
 ```bash
 RG=rg-discovery-yw-uno ./poll.sh                 # default: watches Stage 2
-STAGE=3 ./poll.sh                                # watch Stage 3 instead
+STAGE=3 ./poll.sh                                # watch Stage 3
 ```
 
-Or do it all at once:
+## Estimated cost (default Sweden Central deployment)
 
-```bash
-./deploy.sh all
-```
+Numbers from `./cost.sh` for the default scope (1× `Standard_D4s_v6` system pool + 1× `Standard_NC4as_T4_v3` T4 node pool, scale 0–1):
 
-Inspect / clean up:
+| Scenario | Monthly | Notes |
+|---|---|---|
+| **Idle** (`np1` scaled to 0) | **~$156** | Managed system pool D4s_v6 always on — unavoidable while SC exists |
+| **Active** (`np1` at max=1, 24×7) | **~$564** | Adds T4 on-demand (~$0.56/hr × 730 h) |
+| **Spot** (`NODE_POOL_PRIORITY=Spot`) | **~$279** | T4 spot ≈ 30 % of on-demand; eviction-tolerant workloads only |
+| **`./deploy.sh pause`** | **~$0** | Deletes SC + managed `mrg-dscmp-*` RG; keeps VNet/UAMI/storage/RBAC. Resume in 10–30 min |
+| **`./deploy.sh teardown`** | **~$0** | Full RG delete; redeploy in 40–60 min |
 
-```bash
-./deploy.sh outputs            # list resources
-./deploy.sh teardown           # delete the RG
-```
+> Excludes egress, support plans, chat-model token usage, AKS-internal traffic, and reservations / savings plans. Run `./cost.sh` for live numbers against your actual deployment.
 
-## Customizing each stage
+## Customising each stage
 
-Edit the matching `*.parameters.json` file or pass `--parameters key=value` flags. All stages share the `prefix` parameter (default `disc-yw`); names are derived from it (`vnet-<prefix>`, `sc-<prefix>`, `ws-<prefix>`, …).
+Edit the matching `*.parameters.json` file or pass `--parameters key=value` flags. Full env-var table in [quickstart.md → customisation](quickstart.md#customisation).
 
-**Stage 1 — networking:** `vnetAddressPrefix`, `aksSubnetPrefix`, `workspaceSubnetPrefix`, `agentSubnetPrefix`, `privateEndpointSubnetPrefix`, `searchSubnetPrefix`, `supercomputerNodepoolSubnetPrefix`.
-
-**Stage 2 — supercomputer:** `nodePoolVmSize` (e.g. `Standard_NC4as_T4_v3`, `Standard_NC24ads_A100_v4`), `nodePoolMinNodeCount`, `nodePoolMaxNodeCount`, `nodePoolScaleSetPriority` (`Regular` | `Spot`).
-
-**Stage 3 — workspace:** `chatModelName` (set to `""` to skip the chat model deployment), `chatModelFormat`.
+- **Stage 1 — networking:** `vnetAddressPrefix`, `aksSubnetPrefix`, `workspaceSubnetPrefix`, `agentSubnetPrefix`, `privateEndpointSubnetPrefix`, `searchSubnetPrefix`, `supercomputerNodepoolSubnetPrefix`.
+- **Stage 2 — supercomputer:** `nodePoolVmSize` (e.g. `Standard_NC4as_T4_v3`, `Standard_NC24ads_A100_v4`), `nodePoolMinNodeCount`, `nodePoolMaxNodeCount`, `nodePoolScaleSetPriority` (`Regular` | `Spot`).
+- **Stage 3 — workspace:** `chatModelName` (set to `""` to skip the chat model deployment), `chatModelFormat`.
 
 ## Local validation
 
@@ -72,14 +76,6 @@ Edit the matching `*.parameters.json` file or pass `--parameters key=value` flag
 ./deploy.sh build              # compiles all 3 stages with `az bicep build` (no Azure calls)
 ```
 
-Equivalent manual loop:
-
-```bash
-for f in 01-network.bicep 02-supercomputer.bicep 03-workspace.bicep; do
-  az bicep build --file "$f" --stdout > /dev/null && echo "OK: $f"
-done
-```
-
 ## Connect
 
-After Stage 3, sign in to <https://studio.discovery.microsoft.com/>, select the workspace `ws-disc-yw`, create a project investigation, and start a chat.
+After Stage 3, sign in to <https://studio.discovery.microsoft.com/>, select the workspace `ws-<PREFIX>`, create a project investigation, and start a chat.
