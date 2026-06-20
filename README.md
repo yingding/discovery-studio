@@ -8,7 +8,7 @@ Three-stage Bicep deployment based on the official [Azure quickstart](https://gi
 | 2 | [02-supercomputer.bicep](02-supercomputer.bicep) | UAMI · Storage · RBAC · Supercomputer · Node Pool |
 | 3 | [03-workspace.bicep](03-workspace.bicep) | Workspace · Chat Model · Project · Discovery Storage Container |
 
-For deep dives see [architecture.md](architecture.md) (resource graph, RBAC, network model), [resources-deployed.md](resources-deployed.md) (full inventory of every Azure resource that ends up in your sub, incl. auto-created ones), [roleconcept.md](roleconcept.md) (every RBAC role used and why), and [quickstart.md](quickstart.md) (full helper-script reference).
+For deep dives see [architecture.md](architecture.md) (resource graph, RBAC, network model), [resources-deployed.md](resources-deployed.md) (full inventory of every Azure resource that ends up in your sub, incl. auto-created ones), [roleconcept.md](roleconcept.md) (every RBAC role used and why), [quickstart.md](quickstart.md) (full helper-script reference), and [SUPPORT_TICKET.md](SUPPORT_TICKET.md) (template for the orphan-`legionservicelink`-SAL Microsoft support ticket).
 
 ## Contents
 
@@ -31,7 +31,7 @@ export LOCATION=swedencentral
 ./deploy.sh 1                  # Stage 1: networking            (~1 min)
 ./deploy.sh 2                  # Stage 2: SC + node pool        (~10-20 min: SC ~8-15 min, np1 ~2-5 min)
 ./deploy.sh 3                  # Stage 3: workspace + project   (~30-60 min)
-./deploy.sh 4                  # Stage 4: 'Foundry User' role on workspace managed RG (signed-in az user, ~10s)
+./deploy.sh 4                  # Stage 4: assign 'Foundry User' + 'Microsoft Discovery Platform Contributor' to signed-in az user (~20s)
 ```
 
 Or run all stages in one shot with `./deploy.sh all`.
@@ -98,10 +98,15 @@ Edit the matching `*.parameters.json` file or pass `--parameters key=value` flag
 
 After Stage 3, sign in to <https://studio.discovery.microsoft.com/>, select the workspace `ws-<PREFIX>`, create a project investigation, and start a chat.
 
-If you can't open the workspace, run **Stage 4** to grant yourself the `Foundry User` role on the workspace's managed RG:
+If the workspace won't open or the **Shared Sessions** pane shows *"Access denied. Ensure you have the correct role assigned on this workspace resource"*, run **Stage 4** — it grants two role assignments in one call:
+
+- `Foundry User` on the workspace's managed RG (lets you open the workspace)
+- `Microsoft Discovery Platform Contributor (Preview)` on the workspace resource (lets you use shared sessions, investigations, conversations, tools)
 
 ```bash
 ./deploy.sh 4                          # signed-in az user
 # or
 ./deploy.sh 4 alice@example.com        # specific UPN / object id
 ```
+
+For role / scope alternatives (Reader, Administrator, RG vs workspace vs project scope) see [roleconcept.md](roleconcept.md#workspace-resource-scope--your-user-discovery-platform-contributor).

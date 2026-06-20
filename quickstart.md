@@ -97,6 +97,17 @@ Edit the matching `*.parameters.json` or set env vars before running:
 | `NODE_POOL_MAX_NODE_COUNT` | 2 | `1` | Max GPU nodes |
 | `NODE_POOL_PRIORITY` | 2 | `Regular` | `Regular` or `Spot` — Spot ≈ 30 % of on-demand |
 | `CHAT_MODEL_NAME` | 3 | `gpt-5-mini` | Set to `""` to skip the chat model deployment |
+| `STAGE3_AUTOCLEAN` | 3 | `1` | Stage-3 preflight auto-runs `cleanup-ws` to clear orphan `mrg-dwsp-*` RGs and the `legionservicelink` SAL on `agentSubnet` from a previous failed attempt. Set `0` to refuse-and-instruct instead of cleaning automatically. |
+| `CLEANUP_WAIT_MIN` | `cleanup-ws` | `10` | Max minutes to wait for `mrg-dwsp-*` to disappear before force-deleting the SAL anyway. |
+| `CLEANUP_RECREATE_SUBNET` | `cleanup-ws` | `0` | Nuclear option — drop `agentSubnet` and re-run Stage 1 to restore it. Use only when the SAL force-delete refuses. |
+| `TEARDOWN_WAIT` | `teardown` | `1` | Wait up to 30 min for the parent RG to fully disappear. Set `0` to kick off and return immediately. |
+| `STAGE4_FOUNDRY_ROLE` | 4 | `Foundry User` | Role assigned on the workspace's managed RG (mrg-dwsp-*). Discovery Studio specifically checks this role; no documented alternative. |
+| `STAGE4_DISC_ROLE` | 4 | `Microsoft Discovery Platform Contributor (Preview)` | Role assigned on the workspace resource. Alternatives: `Microsoft Discovery Platform Administrator (Preview)` (admin), `Microsoft Discovery Platform Reader (Preview)` (observer). See [roleconcept.md](roleconcept.md#workspace-resource-scope--your-user-discovery-platform-contributor). |
+| `STAGE4_DISC_SCOPE` | 4 | `workspace` | Scope for `STAGE4_DISC_ROLE`. `workspace` = least-privilege on `ws-<PREFIX>`. `rg` = broaden to the parent RG (MSFT Scientist persona recommendation). For `project` scope assign manually — see [roleconcept.md](roleconcept.md#workspace-resource-scope--your-user-discovery-platform-contributor). |
+| `MCAPS_EXEMPTION` | `prereqs` | `auto` | `1` to force, `0` to disable. Auto-detected from `MCAPS_SUBSCRIPTION_PATTERN` (`*MngEnvMCAP*`). |
+| `STALE_MIN` | `poll.sh` | `5` | Treat the latest stage-N deployment as historical (don't exit, keep polling) when it's been in a terminal state for at least N minutes. `0` restores the old "exit on first terminal state" behaviour. |
+| `MAX_UNKNOWN` | `poll.sh` | `5` | Consecutive `Unknown`-state polls before giving up (rc=2). |
+| `INTERVAL` | `poll.sh` | `60` | Poll interval in seconds. |
 
 #### Node pool SKU options
 
