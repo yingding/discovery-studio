@@ -120,14 +120,30 @@ run_stage() {
     ${extra_params[@]+"${extra_params[@]}"} \
     -o none
 
+  local start_ts start_human end_human elapsed_s elapsed_min rc=0
+  start_ts=$(date +%s)
+  start_human=$(date '+%Y-%m-%d %H:%M:%S %Z')
   log "Stage $num: deploying $file (this can take 15-30 min for SC/Workspace)..."
+  log "Stage $num START: $start_human"
+
+  # Always print the end summary, even on error / Ctrl-C.
+  _stage_summary() {
+    end_human=$(date '+%Y-%m-%d %H:%M:%S %Z')
+    elapsed_s=$(( $(date +%s) - start_ts ))
+    elapsed_min=$(awk "BEGIN { printf \"%.1f\", $elapsed_s/60 }")
+    log "Stage $num END:   $end_human  (elapsed: ${elapsed_min} min / ${elapsed_s}s, rc=$rc)"
+  }
+  trap _stage_summary RETURN
+
   az deployment group create \
     --resource-group "$RG" \
     --name "stage${num}-$(date +%Y%m%d-%H%M%S)" \
     --template-file "$file" \
     --parameters "${file%.bicep}.parameters.json" \
     --parameters location="$LOCATION" \
-    ${extra_params[@]+"${extra_params[@]}"}
+    ${extra_params[@]+"${extra_params[@]}"} || rc=$?
+
+  return $rc
 }
 
 run_build() {
