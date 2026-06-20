@@ -6,7 +6,7 @@
 # negligible (pennies/month).
 #
 # Usage:
-#   ./cost.sh                              # default RG=rg-discovery-yw-uno, PREFIX=disc-yw
+#   ./cost.sh                              # default RG=rg-disc-yw-1, PREFIX=disc-yw-1
 #   RG=rg-foo PREFIX=disc-bar ./cost.sh
 #
 # Caveats:
@@ -19,8 +19,8 @@
 
 set -uo pipefail
 
-RG="${RG:-rg-discovery-yw-uno}"
-PREFIX="${PREFIX:-disc-yw}"
+PREFIX="${PREFIX:-disc-yw-1}"
+RG="${RG:-rg-${PREFIX}}"               # default: rg-<PREFIX>, same convention as deploy.sh
 SC_NAME="sc-${PREFIX}"
 HOURS_PER_MONTH=730
 

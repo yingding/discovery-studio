@@ -31,8 +31,8 @@
 
 set -uo pipefail
 
-RG="${RG:-rg-discovery-yw-uno}"
-PREFIX="${PREFIX:-disc-yw}"
+PREFIX="${PREFIX:-disc-yw-1}"
+RG="${RG:-rg-${PREFIX}}"               # default: rg-<PREFIX>, same convention as deploy.sh
 STAGE="${STAGE:-2}"
 INTERVAL="${INTERVAL:-60}"
 

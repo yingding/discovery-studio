@@ -22,9 +22,9 @@ End-to-end walkthrough of the helper scripts in this repo: [deploy.sh](deploy.sh
 git clone git@github.com:yingding/discovery-studio.git
 cd discovery-studio
 
-export RG=rg-discovery-yw-uno
+export PREFIX=disc-yw-1          # drives every resource name; RG defaults to rg-<PREFIX> if unset
+export RG=rg-disc-yw-1           # optional override; defaults to rg-${PREFIX}
 export LOCATION=swedencentral
-export PREFIX=disc-yw            # all resource names derive from this
 
 ./deploy.sh prereqs              # one-time per subscription (~1 min)
 ./deploy.sh all                  # stages 1 + 2 + 3                 (~40-70 min)
@@ -87,7 +87,7 @@ Edit the matching `*.parameters.json` or set env vars before running:
 
 | Env var | Stage | Default | Notes |
 |---|---|---|---|
-| `PREFIX` | all | `disc-yw` | Drives every resource name (`vnet-<prefix>`, `sc-<prefix>`, …) |
+| `PREFIX` | all | `disc-yw-1` | Drives every resource name (`vnet-<prefix>`, `sc-<prefix>`, …) |
 | `LOCATION` | all | `swedencentral` | One of the 4 Discovery regions |
 | `RG` | all | `rg-<PREFIX>` | Resource group name |
 | `TAG_PURPOSE` | all | `discovery` | FinOps tag value applied to every resource |

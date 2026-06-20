@@ -33,7 +33,7 @@ Stages 2 and 3 reuse resources from earlier stages via `existing` references (lo
 
 ```mermaid
 flowchart TB
-    subgraph RG["Resource Group rg-discovery-yw-uno"]
+    subgraph RG["Resource Group rg-disc-yw-1"]
 
         subgraph S1["Stage 1 — Networking"]
             VNET["Virtual Network<br/>10.0.0.0/16"]

@@ -14,7 +14,7 @@ Companion to [architecture.md](architecture.md) (design / rationale) and [quicks
 
 ## Resources in your deployment RG (`$RG`)
 
-`$RG` defaults to `rg-<PREFIX>` (e.g. `rg-disc-yw`). All examples below use `disc-yw`.
+`$RG` defaults to `rg-<PREFIX>` (e.g. `rg-disc-yw-1`). All resource-name examples below use `disc-yw` for brevity; with the actual default `PREFIX=disc-yw-1` the names would be `vnet-disc-yw-1`, `sc-disc-yw-1`, etc.
 
 ### Created by your Bicep
 
@@ -91,8 +91,8 @@ Outside any single RG.
 ## How to discover what's actually there
 
 ```bash
-RG=rg-discovery-yw-uno
-PREFIX=disc-yw
+RG=rg-disc-yw-1
+PREFIX=disc-yw-1
 SUB=$(az account show --query id -o tsv)
 
 # Everything in your deployment RG

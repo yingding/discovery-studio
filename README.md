@@ -23,7 +23,8 @@ For deep dives see [architecture.md](architecture.md) (resource graph, RBAC, net
 ## Minimal quickstart
 
 ```bash
-export RG=rg-discovery-yw-uno
+export PREFIX=disc-yw-1        # drives every resource name; RG defaults to rg-<PREFIX> if unset
+export RG=rg-disc-yw-1         # optional override; defaults to rg-${PREFIX}
 export LOCATION=swedencentral
 
 ./deploy.sh prereqs            # one-time per sub (~1 min) — registers RPs, creates RG, assigns NSP/Reader roles
@@ -61,7 +62,7 @@ See [quickstart.md](quickstart.md) for the full subcommand reference, customisat
 Every `deploy.sh` stage prints `START` / `END` / elapsed-minute banners. Watch a long stage in a second terminal:
 
 ```bash
-RG=rg-discovery-yw-uno ./poll.sh                 # default: watches Stage 2
+./poll.sh                                        # default: watches Stage 2
 STAGE=3 ./poll.sh                                # watch Stage 3
 ```
 

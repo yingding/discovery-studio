@@ -62,7 +62,7 @@
 #                                            # locked `legionservicelink` SAL on agentSubnet.
 #
 # Configure RG/location via env vars:
-#   RG=rg-discovery-yw-uno LOCATION=swedencentral ./deploy.sh 1
+#   RG=rg-disc-yw-1 LOCATION=swedencentral ./deploy.sh 1
 #   MCAPS_EXEMPTION=0 ./deploy.sh prereqs                          # disable MCAPS check even on MCAPS sub
 #   MCAPS_EXEMPTION=1 ./deploy.sh prereqs                          # force MCAPS check on non-MCAPS sub
 
@@ -78,7 +78,7 @@ set -euo pipefail
 
 # Master knob — every Discovery resource name is derived from this.
 # e.g. PREFIX=disc-yw  -> vnet-disc-yw, sc-disc-yw, ws-disc-yw, uami-disc-yw, ...
-PREFIX="${PREFIX:-disc-yw}"
+PREFIX="${PREFIX:-disc-yw-1}"
 
 LOCATION="${LOCATION:-swedencentral}"
 RG="${RG:-rg-${PREFIX}}"                                   # default: rg-<PREFIX>
