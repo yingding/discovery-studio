@@ -28,10 +28,19 @@ See [architecture.md](architecture.md) for diagrams and per-resource details.
 export RG=rg-discovery-yw-uno
 export LOCATION=swedencentral
 
-./deploy.sh prereqs            # register providers + create RG
+./deploy.sh prereqs            # register providers + create RG + assign NSP/Reader roles (~1 min)
 ./deploy.sh 1                  # Stage 1: networking            (~1 min)
-./deploy.sh 2                  # Stage 2: SC + node pool        (~15-30 min)
+./deploy.sh 2                  # Stage 2: SC + node pool        (~20-35 min: SC ~8-15 min, np1 ~10-25 min)
 ./deploy.sh 3                  # Stage 3: workspace + project   (~15-30 min)
+```
+
+Every stage prints `START` / `END` / elapsed-minute lines so you always know how long each step took.
+
+To watch a long-running stage in another terminal:
+
+```bash
+RG=rg-discovery-yw-uno ./poll.sh                 # default: watches Stage 2
+STAGE=3 ./poll.sh                                # watch Stage 3 instead
 ```
 
 Or do it all at once:
