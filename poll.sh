@@ -74,9 +74,9 @@ discovery_status_lines() {
 
 # Print a summary of each Discovery-managed sibling RG: `<rg-prefix>: N (counts)`.
 # Discovers them via `properties.managedResourceGroup` on Discovery parents in $RG.
-# Format:
-#   <mrg>=N ✓ all Succeeded          (when everything is done)
-#   <mrg>=N (3 Running, 1 Updating, 42 Succeeded)  (in-progress first, then Succeeded)
+# Format per MRG:
+#   <mrg> | resources=N total | <inprog>+<failed>+<succ counts> | deploys=M total | <similar>
+# When everything in a bucket is Succeeded, collapses to `N succeeded ✓`.
 managed_status_line() {
   local mrgs mrg out=""
   mrgs="$(az resource list -g "$RG" \
@@ -88,63 +88,75 @@ managed_status_line() {
     mrg="$(az resource show -g "$RG" --resource-type "$parent_type" --name "$parent_name" \
       --query properties.managedResourceGroup -o tsv 2>/dev/null || true)"
     [[ -z "$mrg" ]] && continue
-    local summary
-    summary="$(az resource list -g "$mrg" --query '[].provisioningState' -o tsv 2>/dev/null | \
-      awk 'BEGIN{n=0}
-        {n++; counts[$1]++}
-        END {
-          if (n==0) {print "0"; exit}
 
-          # Aggregate buckets. Easy-to-scan numbers come first.
-          inp_states = "Running Accepted Creating Updating Deleting Migrating"
-          fail_states = "Failed Canceled"
+    local resource_summary deploy_summary
+    resource_summary="$(az resource list -g "$mrg" --query '[].provisioningState' -o tsv 2>/dev/null \
+      | _bucket_summary)"
+    deploy_summary="$(az deployment group list -g "$mrg" --query '[].properties.provisioningState' -o tsv 2>/dev/null \
+      | _bucket_summary)"
 
-          inp_total = 0; inp_detail = ""
-          split(inp_states, ip, " ")
-          for (i=1; i<=length(ip); i++) {
-            s = ip[i]
-            if (counts[s]+0 > 0) {
-              inp_total += counts[s]
-              inp_detail = inp_detail (inp_detail ? ", " : "") counts[s] " " s
-              delete counts[s]
-            }
-          }
-
-          fail_total = 0; fail_detail = ""
-          split(fail_states, fl, " ")
-          for (i=1; i<=length(fl); i++) {
-            s = fl[i]
-            if (counts[s]+0 > 0) {
-              fail_total += counts[s]
-              fail_detail = fail_detail (fail_detail ? ", " : "") counts[s] " " s
-              delete counts[s]
-            }
-          }
-
-          succ = counts["Succeeded"]+0
-          delete counts["Succeeded"]
-
-          # any leftover unknown states
-          other_total = 0; other_detail = ""
-          for (s in counts) {
-            if (counts[s] != "" && counts[s]+0 > 0) {
-              other_total += counts[s]
-              other_detail = other_detail (other_detail ? ", " : "") counts[s] " " s
-            }
-          }
-
-          # Compose: lead with whats still open (in-progress + failed), then succeeded
-          out = n " total"
-          if (inp_total > 0)  out = out " | " inp_total " in-progress (" inp_detail ")"
-          if (fail_total > 0) out = out " | " fail_total " failed (" fail_detail ")"
-          if (other_total > 0) out = out " | " other_total " other (" other_detail ")"
-          out = out " | " succ " succeeded"
-          if (inp_total == 0 && fail_total == 0 && other_total == 0) out = out " ✓"
-          print out
-        }')"
-    out="${out} | ${mrg}=${summary}"
+    out="${out} | ${mrg} resources=${resource_summary} | deploys=${deploy_summary}"
   done
   printf '%s' "$out"
+}
+
+# Helper used by managed_status_line: read provisioning-state values on stdin
+# (one per line) and emit a bucketed summary.
+#   "<N> total | <inprog> in-progress (<details>) | <failed> failed (<details>) | <succ> succeeded [✓]"
+# When all are Succeeded, collapses to "<N> succeeded ✓".
+_bucket_summary() {
+  awk 'BEGIN{n=0}
+    {n++; counts[$1]++}
+    END {
+      if (n==0) {print "0"; exit}
+      inp_states = "Running Accepted Creating Updating Deleting Migrating"
+      fail_states = "Failed Canceled"
+
+      inp_total = 0; inp_detail = ""
+      split(inp_states, ip, " ")
+      for (i=1; i<=length(ip); i++) {
+        s = ip[i]
+        if (counts[s]+0 > 0) {
+          inp_total += counts[s]
+          inp_detail = inp_detail (inp_detail ? ", " : "") counts[s] " " s
+          delete counts[s]
+        }
+      }
+
+      fail_total = 0; fail_detail = ""
+      split(fail_states, fl, " ")
+      for (i=1; i<=length(fl); i++) {
+        s = fl[i]
+        if (counts[s]+0 > 0) {
+          fail_total += counts[s]
+          fail_detail = fail_detail (fail_detail ? ", " : "") counts[s] " " s
+          delete counts[s]
+        }
+      }
+
+      succ = counts["Succeeded"]+0
+      delete counts["Succeeded"]
+
+      other_total = 0; other_detail = ""
+      for (s in counts) {
+        if (counts[s] != "" && counts[s]+0 > 0) {
+          other_total += counts[s]
+          other_detail = other_detail (other_detail ? ", " : "") counts[s] " " s
+        }
+      }
+
+      # Collapse to compact form when only Succeeded entries
+      if (inp_total == 0 && fail_total == 0 && other_total == 0) {
+        print n " succeeded ✓"
+      } else {
+        out = n " total"
+        if (inp_total > 0)   out = out " | " inp_total " in-progress (" inp_detail ")"
+        if (fail_total > 0)  out = out " | " fail_total " failed (" fail_detail ")"
+        if (other_total > 0) out = out " | " other_total " other (" other_detail ")"
+        out = out " | " succ " succeeded"
+        print out
+      }
+    }'
 }
 
 MAX_UNKNOWN="${MAX_UNKNOWN:-5}"   # consecutive 'Unknown' polls before giving up
