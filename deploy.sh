@@ -520,10 +520,80 @@ stage_3() {
     log "         re-PUT bug — see comments in stage_3())."
     time_step "Stage 3 (children-only)" _stage3_children_via_rest "$sa"
   else
+    # Preflight: refuse to (re)create the workspace while orphans from a
+    # previous failed Stage 3 still hold agentSubnet. Otherwise the new
+    # Foundry Capability Host preflight will fail with:
+    #   "AccountIsNotSucceeded ... subnet agentSubnet is already in use"
+    # and we have to redo the whole 30-60 min Bicep cycle.
+    _stage3_preflight_clean_orphans || exit 1
+
     log "Stage 3: workspace not present; running full Bicep template."
     log "Stage 3: using storageAccountName=$sa from Stage 2 outputs."
     run_stage 3 03-workspace.bicep "${STAGE3_PARAMS[@]}" storageAccountName="$sa"
   fi
+}
+
+# Stage 3 preflight: detect orphans left behind by a previous failed Stage 3
+# and clean them (or refuse) before kicking off the new ~30-60 min Bicep.
+#
+# Two orphan classes we check for (both cause the next workspace deploy to
+# fail with 'AccountIsNotSucceeded' on the Foundry CapabilityHost):
+#   a) mrg-dwsp-ws-<prefix>-*  resource groups (managed RG outlived its ws)
+#   b) Service Association Links on agentSubnet (Foundry SAL outlived its ws)
+#
+# Behavior:
+#   STAGE3_AUTOCLEAN=1 (default) -> automatically run _run_cleanup_ws and
+#                                   continue if clean afterwards.
+#   STAGE3_AUTOCLEAN=0           -> just fail fast with the cleanup command
+#                                   to run, so user can investigate first.
+_stage3_preflight_clean_orphans() {
+  local sub vnet="vnet-${PREFIX}" subnet="agentSubnet"
+  local ws_name="ws-${PREFIX}"
+  sub="$(az account show --query id -o tsv)"
+
+  local orphan_mrgs sals
+  orphan_mrgs=$(az group list \
+    --query "[?starts_with(name, 'mrg-dwsp-${ws_name}-')].name" -o tsv 2>/dev/null || true)
+  sals=$(az rest --method get \
+    --url "https://management.azure.com/subscriptions/${sub}/resourceGroups/${RG}/providers/Microsoft.Network/virtualNetworks/${vnet}/subnets/${subnet}/serviceAssociationLinks?api-version=2024-05-01" \
+    --query "value[].name" -o tsv 2>/dev/null || true)
+
+  if [[ -z "$orphan_mrgs" && -z "$sals" ]]; then
+    log "Stage 3 preflight: no orphans on ${subnet} or ${ws_name}, clean to deploy."
+    return 0
+  fi
+
+  log "Stage 3 preflight: orphans from a previous failed Stage 3 detected:"
+  [[ -n "$orphan_mrgs" ]] && log "  - managed RG(s) still present: ${orphan_mrgs//$'\n'/, }"
+  [[ -n "$sals"        ]] && log "  - SAL(s) holding ${subnet}: ${sals//$'\n'/, }"
+  log "  Deploying now would fail at Foundry CapabilityHost creation"
+  log "  with 'AccountIsNotSucceeded / subnet already in use'."
+
+  if [[ "${STAGE3_AUTOCLEAN:-1}" != "1" ]]; then
+    log "STAGE3_AUTOCLEAN=0 — refusing to deploy. Run:"
+    log "  ./deploy.sh cleanup-ws"
+    log "then re-run: ./deploy.sh 3"
+    return 1
+  fi
+
+  log "STAGE3_AUTOCLEAN=1 — running cleanup-ws automatically (set =0 to disable)."
+  _run_cleanup_ws
+
+  # Re-check; _run_cleanup_ws already exits non-zero if SALs remain, but be
+  # defensive in case it was skipped or partial.
+  orphan_mrgs=$(az group list \
+    --query "[?starts_with(name, 'mrg-dwsp-${ws_name}-')].name" -o tsv 2>/dev/null || true)
+  sals=$(az rest --method get \
+    --url "https://management.azure.com/subscriptions/${sub}/resourceGroups/${RG}/providers/Microsoft.Network/virtualNetworks/${vnet}/subnets/${subnet}/serviceAssociationLinks?api-version=2024-05-01" \
+    --query "value[].name" -o tsv 2>/dev/null || true)
+  if [[ -n "$orphan_mrgs" || -n "$sals" ]]; then
+    log "Preflight cleanup did not fully resolve orphans. Aborting Stage 3."
+    [[ -n "$orphan_mrgs" ]] && log "  still present: MRG ${orphan_mrgs//$'\n'/, }"
+    [[ -n "$sals"        ]] && log "  still present: SAL ${sals//$'\n'/, }"
+    log "Try: CLEANUP_RECREATE_SUBNET=1 ./deploy.sh cleanup-ws  (last-resort: re-stage agentSubnet)"
+    return 1
+  fi
+  log "Preflight cleanup complete — proceeding with Stage 3 Bicep."
 }
 
 # Returns 0 if ws-<PREFIX> exists at all (Succeeded or in-flight). Used to
