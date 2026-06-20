@@ -698,14 +698,37 @@ _run_cleanup_ws() {
   log "Stage 3 cleanup: workspace=$ws_name, vnet=$vnet, subnet=$subnet"
 
   # --- 1. Delete the workspace (if any state present) ---
-  if az resource show -g "$RG" --resource-type Microsoft.Discovery/workspaces \
-        --name "$ws_name" --query name -o tsv >/dev/null 2>&1; then
-    log "Deleting workspace $ws_name (cascades to mrg-dwsp-*; this can take 5-15 min)..."
-    az resource delete -g "$RG" --resource-type Microsoft.Discovery/workspaces \
-      --name "$ws_name" 2>&1 | tail -5 || true
-  else
-    log "Workspace $ws_name not present, skipping delete."
-  fi
+  # Use REST GET (not `az resource show`, which returns 404 mid-delete even
+  # while the workspace still exists in state 'Deleting').
+  local ws_state
+  ws_state=$(az rest --method get \
+    --url "https://management.azure.com/subscriptions/${sub}/resourceGroups/${RG}/providers/Microsoft.Discovery/workspaces/${ws_name}?api-version=2026-06-01" \
+    --query properties.provisioningState -o tsv 2>/dev/null || true)
+  case "$ws_state" in
+    "")
+      log "Workspace $ws_name not present, skipping delete."
+      ;;
+    Deleting)
+      log "Workspace $ws_name already in state 'Deleting' — letting it finish."
+      ;;
+    *)
+      log "Deleting workspace $ws_name (current state: $ws_state, cascades to mrg-dwsp-*; 5-15 min)..."
+      az resource delete -g "$RG" --resource-type Microsoft.Discovery/workspaces \
+        --name "$ws_name" 2>&1 | tail -5 || true
+      ;;
+  esac
+
+  # --- 1b. Directly delete any orphaned managed RG ---
+  # If the workspace was already gone but its managed RG (mrg-dwsp-ws-<prefix>-*)
+  # is still around, the RG won't disappear on its own — Discovery's cascade
+  # only fires while the workspace is being deleted. Delete it ourselves so
+  # the SAL has no rightful owner left.
+  local orphan
+  for orphan in $(az group list \
+      --query "[?starts_with(name, 'mrg-dwsp-${ws_name}-')].name" -o tsv 2>/dev/null); do
+    log "Deleting orphaned managed RG $orphan (async)..."
+    az group delete --name "$orphan" --yes --no-wait || true
+  done
 
   # --- 2. Wait for every Foundry managed RG (mrg-dwsp-ws-<prefix>-*) to vanish ---
   local deadline=$(( $(date +%s) + wait_min * 60 ))
